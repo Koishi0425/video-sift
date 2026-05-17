@@ -1,0 +1,12 @@
+# Python Cache & Virtual Environments
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Project specific
+outputs/
+settings.py
+*.log
+todo.txt
