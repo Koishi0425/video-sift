@@ -10,3 +10,7 @@ outputs/
 settings.py
 *.log
 todo.txt
+
+# Editor / AI tools
+.claude/
+.vscode/

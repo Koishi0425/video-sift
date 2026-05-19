@@ -16,8 +16,8 @@
 
 1. **克隆仓库代码：**
    ```bash
-   git clone https://github.com/your-username/nomorevideo.git
-   cd nomorevideo
+   git clone https://github.com/Koishi0425/video-sift.git
+   cd video-shift
    ```
 
 2. **安装系统依赖 (ffmpeg):**
