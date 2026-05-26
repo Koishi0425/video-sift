@@ -1,77 +1,127 @@
 # NoMoreVideo
 
-一个通过 Whisper 进行语音识别，并利用 DeepSeek 总结视频或音频核心内容的工具。
-帮你告别冗长的视频和废话，直接提取结构化的内容要点和核心信息。
+一个通过 Whisper 转写音视频，并用 DeepSeek 提炼结构化摘要的小工具。
 
-## 功能特性
+它适合用来快速处理很长的视频、播客或会议录音：先提取音频，再转成文字，最后输出 `summary.md`。
 
-- 支持本地音频/视频文件以及在线视频链接（通过 `yt-dlp` 支持的站点，如 YouTube/Bilibili 等）
-- 本地基于 Whisper 模型的精准语音转文本
-- 智能全自动语言检测（采用 `tiny` 模型快速检测，`medium` 或较大模型进行长音频转写），省时高效
-- 大语言模型（DeepSeek）长文本分块处理与内容提取、结构化总结
+## 功能
 
-## 安装依赖
+- 支持本地音频/视频文件。
+- 支持 `yt-dlp` 能处理的在线视频链接，例如 Bilibili、YouTube。
+- 支持直接输入 Bilibili BV 号，例如 `BV1xxxxxxx`。
+- 支持自动检测转写语言，也可以通过 `--language` 手动指定。
+- 长音频会自动切分，长文本会分块总结后再合并。
+- 会复用已经生成过的音频、转写和总结，避免重复等待。
+- 处理完成后会在控制台显示可点击的结果文件位置。
 
-本项目需要 Python 3.8 或以上版本。
+## 安装
 
-1. **克隆仓库代码：**
-   ```bash
-   git clone https://github.com/Koishi0425/video-sift.git
-   cd video-shift
-   ```
+需要 Python 3.8 或更高版本，并确保系统已安装 `ffmpeg`。
 
-2. **安装系统依赖 (ffmpeg):**
-   请务必在你的系统上安装 `ffmpeg`，并将其添加到环境变量 `PATH` 中：
-   - Windows: 可通过 Scoop (`scoop install ffmpeg`)、Chocolatey 安装或直接下载二进制文件。
-   - macOS: `brew install ffmpeg`
-   - Linux: `sudo apt install ffmpeg`
+Windows 可以用 Scoop 或 Chocolatey 安装：
 
-3. **安装 Python 依赖库:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-## 配置项
-
-初次运行前，请基于配置文件模板创建你的个人配置：
-
-```bash
-cp settings.example.py settings.py
+```powershell
+scoop install ffmpeg
 ```
 
-在 `settings.py` 中填入你的：
+或：
+
+```powershell
+choco install ffmpeg
+```
+
+安装 Python 依赖：
+
+```powershell
+pip install -r requirements.txt
+```
+
+如果想直接使用 `nomorevideo` 命令，可以在项目目录执行：
+
+```powershell
+pip install -e .
+```
+
+## 配置
+
+首次运行前，复制配置模板：
+
+```powershell
+copy settings.example.py settings.py
+```
+
+然后在 `settings.py` 里填写：
+
 - `DEEPSEEK_API_KEY`
-- (可选) 代理设置 `YTDLP_PROXY` 等参数。
+- `YTDLP_PROXY`，如果不需要代理可以设为空字符串
+- 默认 Whisper 模型、DeepSeek 模型等配置
 
-> ⚠️ 注意：`settings.py` 已经被加入 `.gitignore`，请勿将你的 API Key 和隐私配置提交到版本库！
+`settings.py` 已经在 `.gitignore` 中，不要把真实 API Key 提交到仓库。
 
-## 使用方法
+## 使用
 
-**基本用法：**
-```bash
-python main.py <视频链接或本地文件路径>
+安装命令入口后：
+
+```powershell
+nomorevideo BV1xxxxxxxxxx
 ```
 
-**示例（处理在线视频）：**
-```bash
-python main.py https://www.bilibili.com/video/BV1...
+也可以输入完整链接：
+
+```powershell
+nomorevideo https://www.bilibili.com/video/BV1xxxxxxxxxx
 ```
 
-**跳过检测直接使用特定语言转写（例如日语）：**
-```bash
-python main.py https://www.youtube.com/watch?v=... --language ja --whisper-model medium
+或处理本地文件：
+
+```powershell
+nomorevideo .\example.mp4
 ```
 
-### 命令参数
+如果不带参数直接运行，程序会提示你输入视频链接、BV 号或本地文件路径：
 
-- `--workdir`: 中间文件和结果输出根目录 (默认: `outputs`)
-- `--detect-model`: 用于自动检测语言的较小 Whisper 模型名称 (默认: `tiny`)
-- `--whisper-model`: 本地 Whisper 模型名称 (默认: `medium`)
-- `--language`: 转写语言代码，例如 `auto`/`zh`/`ja`/`en` (默认: `auto`)
-- `--force`: 忽略已有音频和转写文本，强制重新处理
-- `--download-only`: 只下载/提取音频，不转写也不总结
-- `--transcript-only`: 只执行到语音转文字，不调用大模型阶段
+```powershell
+nomorevideo
+```
 
-## 开源协议
+仍然可以用原来的方式运行：
+
+```powershell
+python main.py BV1xxxxxxxxxx
+```
+
+## 常用参数
+
+- `--workdir`: 中间文件和结果输出目录，默认是 `outputs`。
+- `--detect-model`: 自动检测语言用的 Whisper 模型，默认来自 `settings.py`。
+- `--whisper-model`: 转写用的 Whisper 模型，默认来自 `settings.py`。
+- `--llm-model`: DeepSeek 总结模型，默认来自 `settings.py`。
+- `--language`: 转写语言，例如 `auto`、`zh`、`ja`、`en`。
+- `--force`: 重新提取音频并转写。
+- `--force-summary`: 只强制重新生成总结。
+- `--download-only`: 只下载或提取音频。
+- `--transcript-only`: 只转写，不调用 DeepSeek。
+- `--summary-only`: 复用已有 `transcript.txt` 重新总结。
+
+## 输出
+
+每个输入会在 `outputs` 下生成一个独立任务目录。目录名会优先包含平台、视频号和标题，例如：
+
+```text
+bilibili_BV1xxxxxxxxxx_视频标题_ab12cd34ef
+```
+
+常见文件包括：
+
+- `audio.mp3`: 提取出的音频。
+- `transcript.txt`: Whisper 转写文本。
+- `transcript_with_timestamps.md`: 带时间戳的转写文本。
+- `transcript_segments.json`: 原始分段信息。
+- `summary.md`: DeepSeek 生成的结构化总结。
+- `run.log`: 本次运行日志。
+
+处理完成后，控制台会直接显示这些关键文件的完整路径；在支持链接的终端里可以直接点击打开。
+
+## License
 
 MIT License

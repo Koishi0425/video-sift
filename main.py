@@ -1,25 +1,55 @@
 import hashlib
+import importlib.util
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import click
 from openai import OpenAI
-import settings
 import whisper
 from pydub import AudioSegment
+
+
+def load_settings():
+    try:
+        import settings as settings_module
+
+        return settings_module
+    except ModuleNotFoundError as exc:
+        if exc.name != "settings":
+            raise
+
+    settings_path = Path(__file__).resolve().with_name("settings.py")
+    if not settings_path.exists():
+        raise RuntimeError(
+            f"找不到配置文件：{settings_path}。请先根据 settings.example.py 创建 settings.py。"
+        )
+
+    spec = importlib.util.spec_from_file_location("settings", settings_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"无法加载配置文件：{settings_path}")
+
+    settings_module = importlib.util.module_from_spec(spec)
+    sys.modules["settings"] = settings_module
+    spec.loader.exec_module(settings_module)
+    return settings_module
+
+
+settings = load_settings()
 
 
 SYSTEM_PROMPT = """你是一个逻辑严密的知识提炼专家。用户会给你一份从视频中提取的语音识别文本。这个视频的 up主讲解可能缺乏条理、内容跳脱、有很多口水话。你的任务是：
 忽略原本杂乱的叙述顺序，提取出核心观点。
 剔除废话、重复内容和不相关的情感宣泄。
 让读者能以最高的效率获取视频的有效信息。
+不仅仅要整理视频内容，还要在结尾总结出视频的核心论点和结论，帮助读者快速理解视频的价值。
 直接输出结构化的 Markdown 格式输出（包括：核心主题、背景/问题、核心论点分解、结论）。"""
 
 DEFAULT_MODEL = settings.DEFAULT_LLM_MODEL
@@ -28,6 +58,7 @@ DEFAULT_TRANSCRIBE_LANGUAGE = getattr(settings, "DEFAULT_TRANSCRIBE_LANGUAGE", "
 MAX_CHUNK_MINUTES = settings.MAX_CHUNK_MINUTES
 SUMMARY_CHUNK_CHARS = getattr(settings, "SUMMARY_CHUNK_CHARS", 12000)
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])")
 
 
 def setup_logging(workdir: Path, log_level: str) -> None:
@@ -46,8 +77,48 @@ def log_stage(stage: str, started_at: float) -> None:
     logging.info("%s完成，耗时 %.1f 秒", stage, time.perf_counter() - started_at)
 
 
+def announce_outputs(title: str, paths: list[tuple[str, Path]]) -> None:
+    click.echo()
+    click.secho(title, fg="green", bold=True)
+    for label, path in paths:
+        click.echo(f"{label}: {terminal_path_link(path)}")
+
+
+def terminal_path_link(path: Path) -> str:
+    resolved = path.resolve()
+    if not sys.stdout.isatty():
+        return str(resolved)
+
+    uri = resolved.as_uri()
+    return f"\033]8;;{uri}\033\\{resolved}\033]8;;\033\\"
+
+
 def source_hash(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()[:10]
+
+
+def extract_bilibili_bvid(value: str) -> str | None:
+    match = BILIBILI_BVID_PATTERN.search(value)
+    if not match:
+        return None
+    bvid = match.group(0)
+    return f"BV{bvid[2:]}"
+
+
+def bilibili_video_url(bvid: str) -> str:
+    return f"https://www.bilibili.com/video/{bvid}"
+
+
+def normalize_source(source: str) -> str:
+    normalized = source.strip()
+    if is_url(normalized) or Path(normalized).expanduser().exists():
+        return normalized
+
+    bvid = extract_bilibili_bvid(normalized)
+    if bvid:
+        return bilibili_video_url(bvid)
+
+    return normalized
 
 
 def safe_name(value: str, max_length: int = 60) -> str:
@@ -56,23 +127,59 @@ def safe_name(value: str, max_length: int = 60) -> str:
     return name[:max_length] or "video"
 
 
-def source_label(source: str) -> str:
+def source_label(source: str, video_info: dict | None = None) -> str:
     if not is_url(source):
         return safe_name(Path(source).expanduser().stem)
 
     parsed = urlparse(source)
     query = parse_qs(parsed.query)
+    title = ""
+    if video_info and video_info.get("title"):
+        title = safe_name(str(video_info["title"]), 80)
+
+    if "bilibili.com" in parsed.netloc:
+        bvid = extract_bilibili_bvid(parsed.path)
+        if bvid:
+            base = f"bilibili_{bvid}"
+            return safe_name(f"{base}_{title}", 140) if title else safe_name(base)
     if parsed.netloc.endswith("youtube.com") and query.get("v"):
-        return safe_name(f"youtube_{query['v'][0]}")
+        base = f"youtube_{query['v'][0]}"
+        return safe_name(f"{base}_{title}", 140) if title else safe_name(base)
     if parsed.netloc.endswith("youtu.be") and parsed.path.strip("/"):
-        return safe_name(f"youtube_{parsed.path.strip('/')}")
+        base = f"youtube_{parsed.path.strip('/')}"
+        return safe_name(f"{base}_{title}", 140) if title else safe_name(base)
 
     path_part = Path(parsed.path).stem or parsed.netloc
-    return safe_name(f"{parsed.netloc}_{path_part}")
+    base = f"{parsed.netloc}_{path_part}"
+    return safe_name(f"{base}_{title}", 140) if title else safe_name(base)
 
 
-def resolve_job_dir(source: str, base_workdir: Path) -> Path:
-    return base_workdir / f"{source_hash(source)}_{source_label(source)}"
+def find_existing_job_dir(source: str, base_workdir: Path) -> Path | None:
+    if not base_workdir.exists():
+        return None
+
+    current_hash = source_hash(source)
+    for candidate in base_workdir.iterdir():
+        if not candidate.is_dir():
+            continue
+        metadata = load_metadata(candidate)
+        if metadata and metadata.get("source_hash") == current_hash and metadata.get("source") == source:
+            return candidate
+
+    return None
+
+
+def resolve_job_dir(source: str, base_workdir: Path, video_info: dict | None = None) -> Path:
+    label = source_label(source, video_info)
+    preferred = base_workdir / f"{label}_{source_hash(source)}"
+    existing = find_existing_job_dir(source, base_workdir)
+    if existing:
+        if existing != preferred and not preferred.exists():
+            existing.rename(preferred)
+            return preferred
+        return existing
+
+    return preferred
 
 
 def metadata_path(workdir: Path) -> Path:
@@ -87,16 +194,26 @@ def summary_path(workdir: Path) -> Path:
     return workdir / "summary.md"
 
 
-def write_metadata(workdir: Path, source: str, whisper_model: str, audio_path: Path, language: str, detected_language: str | None = None) -> None:
+def write_metadata(
+    workdir: Path,
+    source: str,
+    whisper_model: str,
+    audio_path: Path,
+    language: str,
+    detected_language: str | None = None,
+    video_info: dict | None = None,
+) -> None:
     metadata = {
         "source": source,
         "source_hash": source_hash(source),
-        "source_label": source_label(source),
+        "source_label": source_label(source, video_info),
         "whisper_model": whisper_model,
         "language": language,
         "detected_language": detected_language,
         "audio_path": audio_path.name,
     }
+    if video_info:
+        metadata["video_info"] = video_info
     metadata_path(workdir).write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -136,6 +253,47 @@ def prepare_workdir(workdir: Path) -> None:
     workdir.mkdir(parents=True, exist_ok=True)
 
 
+def ytdlp_proxy_args() -> list[str]:
+    proxy = getattr(settings, "YTDLP_PROXY", "")
+    return ["--proxy", proxy] if proxy else []
+
+
+def fetch_video_info(source: str) -> dict | None:
+    if not is_url(source):
+        return None
+
+    command = [
+        "yt-dlp",
+        "--dump-single-json",
+        "--no-playlist",
+        "--skip-download",
+        *ytdlp_proxy_args(),
+        source,
+    ]
+
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        data = json.loads(result.stdout)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+        return None
+
+    info = {
+        "id": data.get("id"),
+        "title": data.get("title"),
+        "uploader": data.get("uploader"),
+        "webpage_url": data.get("webpage_url"),
+        "extractor": data.get("extractor_key") or data.get("extractor"),
+    }
+    return {key: value for key, value in info.items() if value}
+
+
 def format_timestamp(seconds: float) -> str:
     total_seconds = int(seconds)
     hours = total_seconds // 3600
@@ -161,8 +319,7 @@ def extract_audio(source: str, workdir: Path) -> Path:
             "download:%(progress._default_template)s",
             "-o",
             str(workdir / "source.%(ext)s"),
-            "--proxy",
-            settings.YTDLP_PROXY,
+            *ytdlp_proxy_args(),
             source,
         ]
         logging.debug("执行下载命令：%s", " ".join(command))
@@ -355,7 +512,7 @@ def validate_stage_options(download_only: bool, transcript_only: bool, summary_o
 
 
 @click.command()
-@click.argument("source")
+@click.argument("source", required=False)
 @click.option("--workdir", type=click.Path(path_type=Path), default=DEFAULT_WORKDIR, show_default=True, help="中间文件和结果输出根目录。")
 @click.option("--detect-model", default=settings.DEFAULT_DETECT_WHISPER_MODEL, show_default=True, help="用于自动检测语言的较小 Whisper 模型名称，例如 tiny/base。")
 @click.option("--whisper-model", default=settings.DEFAULT_WHISPER_MODEL, show_default=True, help="本地 Whisper 模型名称，例如 tiny/base/small/medium/large。")
@@ -368,7 +525,7 @@ def validate_stage_options(download_only: bool, transcript_only: bool, summary_o
 @click.option("--summary-only", is_flag=True, help="只使用已匹配的 transcript.txt 重新总结，不下载或转写。")
 @click.option("--log-level", default="INFO", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"], case_sensitive=False), show_default=True, help="日志级别。")
 def main(
-    source: str,
+    source: str | None,
     workdir: Path,
     detect_model: str,
     whisper_model: str,
@@ -382,15 +539,27 @@ def main(
     log_level: str,
 ) -> None:
     """将视频 URL 或本地视频文件转写并整理为 Markdown 摘要。"""
+    if not source:
+        source = click.prompt("请输入视频链接、BV号或本地文件路径", type=str)
+
+    raw_source = source
+    source = normalize_source(source)
     language = language.strip().lower()
     validate_stage_options(download_only, transcript_only, summary_only)
     ensure_ffmpeg_available()
-    job_dir = resolve_job_dir(source, workdir)
+    video_info = fetch_video_info(source)
+    job_dir = resolve_job_dir(source, workdir, video_info)
     prepare_workdir(job_dir)
     setup_logging(job_dir, log_level)
     logging.info("任务目录：%s", job_dir)
     logging.info("输入源：%s", source)
     logging.info("Whisper 模型：%s，转写语言：%s，LLM 模型：%s", whisper_model, language, llm_model)
+
+    if video_info and video_info.get("title"):
+        logging.info("视频标题：%s", video_info["title"])
+
+    if source != raw_source.strip():
+        logging.info("已将输入解析为：%s", source)
 
     audio_path = job_dir / "audio.mp3"
     cached_transcript_path = transcript_path(job_dir)
@@ -407,11 +576,18 @@ def main(
             started_at = time.perf_counter()
             logging.info("正在提取音频...")
             audio_path = extract_audio(source, job_dir)
-            write_metadata(job_dir, source, whisper_model, audio_path, language)
+            write_metadata(job_dir, source, whisper_model, audio_path, language, video_info=video_info)
             log_stage("音频提取", started_at)
 
         if download_only:
             logging.info("已按 --download-only 停止：%s", audio_path)
+            announce_outputs(
+                "音频已准备好",
+                [
+                    ("音频文件", audio_path),
+                    ("任务目录", job_dir),
+                ],
+            )
             return
 
         if not force and metadata_matches(job_dir, source, whisper_model, language) and is_nonempty_file(cached_transcript_path):
@@ -421,7 +597,7 @@ def main(
             started_at = time.perf_counter()
             logging.info("正在进行语音转文字...")
             transcript, detected_language = transcribe_audio(audio_path, job_dir, detect_model, whisper_model, language)
-            write_metadata(job_dir, source, whisper_model, audio_path, language, detected_language)
+            write_metadata(job_dir, source, whisper_model, audio_path, language, detected_language, video_info)
             log_stage("语音转文字", started_at)
 
     if not transcript.strip():
@@ -429,10 +605,26 @@ def main(
 
     if transcript_only:
         logging.info("已按 --transcript-only 停止：%s", cached_transcript_path)
+        announce_outputs(
+            "转写已完成",
+            [
+                ("转写文本", cached_transcript_path),
+                ("带时间戳文本", job_dir / "transcript_with_timestamps.md"),
+                ("任务目录", job_dir),
+            ],
+        )
         return
 
     if not force_summary and not force and metadata_matches(job_dir, source, whisper_model, language) and is_nonempty_file(cached_summary_path):
         logging.info("复用已存在的总结：%s", cached_summary_path)
+        announce_outputs(
+            "总结已完成（复用已有结果）",
+            [
+                ("总结文件", cached_summary_path),
+                ("转写文本", cached_transcript_path),
+                ("任务目录", job_dir),
+            ],
+        )
         return
 
     logging.info("正在调用 DeepSeek 进行逻辑重构...")
@@ -442,6 +634,15 @@ def main(
     log_stage("DeepSeek 总结", started_at)
 
     logging.info("完成：%s", cached_summary_path)
+    announce_outputs(
+        "总结已完成",
+        [
+            ("总结文件", cached_summary_path),
+            ("转写文本", cached_transcript_path),
+            ("带时间戳文本", job_dir / "transcript_with_timestamps.md"),
+            ("任务目录", job_dir),
+        ],
+    )
 
 
 if __name__ == "__main__":

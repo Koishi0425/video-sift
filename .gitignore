@@ -14,3 +14,6 @@ todo.txt
 # Editor / AI tools
 .claude/
 .vscode/
+
+*.egg-info/
+dist/
