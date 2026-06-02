@@ -302,6 +302,23 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
+def _probe_audio_codec(filepath: Path) -> str | None:
+    command = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "a:0",
+        "-show_entries", "stream=codec_name",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(filepath),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        codec = result.stdout.strip()
+        return codec if codec else None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
 def extract_audio(source: str, workdir: Path) -> Path:
     prepare_workdir(workdir)
     audio_path = workdir / "audio.mp3"
@@ -309,7 +326,7 @@ def extract_audio(source: str, workdir: Path) -> Path:
     if is_url(source):
         command = [
             "yt-dlp",
-            "--extract-audio",
+            "-x",
             "--audio-format",
             "mp3",
             "--audio-quality",
@@ -334,7 +351,14 @@ def extract_audio(source: str, workdir: Path) -> Path:
     if not input_path.exists():
         raise click.ClickException(f"找不到输入文件：{input_path}")
 
-    command = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-acodec", "libmp3lame", str(audio_path)]
+    codec = _probe_audio_codec(input_path)
+    if codec == "mp3":
+        logging.info("输入文件音频已是 mp3 编码，直接提取并跳过转码")
+        command = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-acodec", "copy", str(audio_path)]
+    else:
+        logging.info("输入文件编码为 %s，转码为 mp3", codec or "未知")
+        command = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-acodec", "libmp3lame", str(audio_path)]
+        
     logging.debug("执行音频提取命令：%s", " ".join(command))
     subprocess.run(command, check=True)
     return audio_path
