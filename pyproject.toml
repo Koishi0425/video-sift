@@ -13,10 +13,16 @@ dependencies = [
     "click",
     "pydub",
     "openai",
+    "PySide6",
+    "PySide6-Fluent-Widgets",
+    "audioop-lts; python_version >= '3.13'",
 ]
 
 [project.scripts]
 nomorevideo = "main:main"
 
+[project.gui-scripts]
+video-sift = "gui:main"
+
 [tool.setuptools]
-py-modules = ["main"]
+py-modules = ["main", "gui"]

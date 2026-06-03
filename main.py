@@ -59,6 +59,11 @@ MAX_CHUNK_MINUTES = settings.MAX_CHUNK_MINUTES
 SUMMARY_CHUNK_CHARS = getattr(settings, "SUMMARY_CHUNK_CHARS", 12000)
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])")
+DEFAULT_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/125.0.0.0 Safari/537.36"
+)
 
 
 def setup_logging(workdir: Path, log_level: str) -> None:
@@ -253,9 +258,51 @@ def prepare_workdir(workdir: Path) -> None:
     workdir.mkdir(parents=True, exist_ok=True)
 
 
-def ytdlp_proxy_args() -> list[str]:
+def ytdlp_proxy_args(source: str) -> list[str]:
     proxy = getattr(settings, "YTDLP_PROXY", "")
-    return ["--proxy", proxy] if proxy else []
+    if not proxy:
+        return []
+    
+    if "youtube.com" in source or "youtu.be" in source:
+        return ["--proxy", proxy]
+    
+    return []
+
+
+def is_bilibili_url(source: str) -> bool:
+    parsed = urlparse(source)
+    return parsed.netloc.lower().endswith("bilibili.com")
+
+
+def ytdlp_request_args(source: str) -> list[str]:
+    args = [*ytdlp_proxy_args(source)]
+
+    user_agent = getattr(settings, "YTDLP_USER_AGENT", DEFAULT_BROWSER_USER_AGENT)
+    if user_agent:
+        args.extend(["--user-agent", user_agent])
+
+    if is_bilibili_url(source):
+        headers = getattr(
+            settings,
+            "YTDLP_BILIBILI_HEADERS",
+            {
+                "Referer": "https://www.bilibili.com/",
+                "Origin": "https://www.bilibili.com",
+            },
+        )
+        for name, value in headers.items():
+            if value:
+                args.extend(["--add-headers", f"{name}:{value}"])
+
+    cookies_file = getattr(settings, "YTDLP_COOKIES_FILE", "")
+    if cookies_file:
+        args.extend(["--cookies", str(Path(cookies_file).expanduser())])
+
+    cookies_from_browser = getattr(settings, "YTDLP_COOKIES_FROM_BROWSER", "")
+    if cookies_from_browser:
+        args.extend(["--cookies-from-browser", cookies_from_browser])
+
+    return args
 
 
 def fetch_video_info(source: str) -> dict | None:
@@ -267,7 +314,7 @@ def fetch_video_info(source: str) -> dict | None:
         "--dump-single-json",
         "--no-playlist",
         "--skip-download",
-        *ytdlp_proxy_args(),
+        *ytdlp_request_args(source),
         source,
     ]
 
@@ -336,7 +383,7 @@ def extract_audio(source: str, workdir: Path) -> Path:
             "download:%(progress._default_template)s",
             "-o",
             str(workdir / "source.%(ext)s"),
-            *ytdlp_proxy_args(),
+            *ytdlp_request_args(source),
             source,
         ]
         logging.debug("执行下载命令：%s", " ".join(command))

@@ -3,3 +3,6 @@ openai-whisper
 click
 pydub
 openai
+PySide6
+PySide6-Fluent-Widgets
+audioop-lts
