@@ -138,6 +138,41 @@ bilibili_BV1xxxxxxxxxx_视频标题_ab12cd34ef
 
 处理完成后，控制台会直接显示这些关键文件的完整路径；在支持链接的终端里可以直接点击打开。
 
+## PyAppify 打包发行
+
+项目已提供 `pyappify.yml` 和 GitHub Actions workflow，可通过 PyAppify 打包发行 GUI 版本。
+
+当前发行配置：
+
+- 应用名：`video-sift`
+- 入口脚本：`gui.py`
+- Python 版本：`3.12`
+- 依赖文件：`requirements.txt`
+- 代码仓库：`https://github.com/Koishi0425/video-sift.git`
+- GitHub Actions：`.github/workflows/pyappify-release.yml`
+
+### 通过 GitHub Actions 发行
+
+PyAppify 使用 Git 标签管理版本。准备发行前，创建语义化版本标签并推送：
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+推送 `v*` 标签后，GitHub Actions 会在 Windows runner 上执行 PyAppify 构建，并将 `pyappify_dist/*` 上传到对应的 GitHub Release。
+
+也可以在 GitHub Actions 页面手动运行 `PyAppify Release` workflow。手动运行会生成 `video-sift-pyappify` artifact，适合测试打包结果，但不会自动创建 Release。
+
+### 轻量启动器发行
+
+如果只想分发轻量启动器，将以下文件放在同一目录：
+
+- `pyappify.yml`
+- `pyappify.exe`
+
+用户首次启动时，PyAppify 会从 Git 仓库拉取代码、下载隔离 Python 环境并安装依赖。GitHub Actions 方式则会预构建包含 Python、虚拟环境和依赖的数据包，更适合离线或少折腾的发行。
+
 ## GUI 优化 TODO
 
 ### P0 应用结构
@@ -171,7 +206,7 @@ bilibili_BV1xxxxxxxxxx_视频标题_ab12cd34ef
 
 - [ ] 增加设置页面，管理 DeepSeek API、代理、cookies、默认模型、默认语言。
 - [x] 增加依赖检查，提示 ffmpeg、yt-dlp、Whisper 模型缓存等状态。
-- [ ] 为 PyAppify 准备稳定 GUI 入口和发行配置。
+- [x] 为 PyAppify 准备稳定 GUI 入口和发行配置。
 - [ ] 增加应用图标、版本号、发行说明和更新说明。
 - [ ] 规划模型缓存、输出目录、配置文件在发行版中的默认位置。
 

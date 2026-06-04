@@ -1,0 +1,41 @@
+name: PyAppify Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Windows package
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build with PyAppify
+        id: build-app
+        uses: ok-oldking/pyappify-action@master
+        with:
+          version: "v1.1.3"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-sift-pyappify
+          path: pyappify_dist/*
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pyappify_dist/*
+          body: |
+            Video Sift PyAppify release.
+
+            This package is built with PyAppify and includes the launcher plus prebuilt runtime data for offline-friendly distribution.

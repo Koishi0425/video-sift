@@ -1,0 +1,7 @@
+name: "video-sift"
+profiles:
+  - name: "release"
+    git_url: "https://github.com/Koishi0425/video-sift.git"
+    main_script: "gui.py"
+    requires_python: "3.12"
+    requirements: "requirements.txt"
