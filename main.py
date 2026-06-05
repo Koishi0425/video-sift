@@ -1,5 +1,4 @@
 import hashlib
-import importlib.util
 import json
 import logging
 import os
@@ -15,34 +14,10 @@ import click
 from openai import OpenAI
 import whisper
 from pydub import AudioSegment
+from config_utils import load_settings
 
 
-def load_settings():
-    try:
-        import settings as settings_module
-
-        return settings_module
-    except ModuleNotFoundError as exc:
-        if exc.name != "settings":
-            raise
-
-    settings_path = Path(__file__).resolve().with_name("settings.py")
-    if not settings_path.exists():
-        raise RuntimeError(
-            f"找不到配置文件：{settings_path}。请先根据 settings.example.py 创建 settings.py。"
-        )
-
-    spec = importlib.util.spec_from_file_location("settings", settings_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"无法加载配置文件：{settings_path}")
-
-    settings_module = importlib.util.module_from_spec(spec)
-    sys.modules["settings"] = settings_module
-    spec.loader.exec_module(settings_module)
-    return settings_module
-
-
-settings = load_settings()
+settings = load_settings(Path(__file__).resolve().parent)
 
 
 SYSTEM_PROMPT = """你是一个逻辑严密的知识提炼专家。用户会给你一份从视频中提取的语音识别文本。这个视频的 up主讲解可能缺乏条理、内容跳脱、有很多口水话。你的任务是：
@@ -335,6 +310,8 @@ def fetch_video_info(source: str) -> dict | None:
         "id": data.get("id"),
         "title": data.get("title"),
         "uploader": data.get("uploader"),
+        "duration": data.get("duration"),
+        "view_count": data.get("view_count"),
         "webpage_url": data.get("webpage_url"),
         "extractor": data.get("extractor_key") or data.get("extractor"),
     }
@@ -499,7 +476,10 @@ def transcribe_audio(audio_path: Path, workdir: Path, detect_model_name: str, wh
 def deepseek_client() -> OpenAI:
     api_key = os.getenv("DEEPSEEK_API_KEY") or settings.DEEPSEEK_API_KEY
     if not api_key:
-        raise click.ClickException("未设置 DeepSeek API Key。请在环境变量 DEEPSEEK_API_KEY 或 settings.py 中配置 DEEPSEEK_API_KEY。")
+        raise click.ClickException(
+            f"未设置 DeepSeek API Key。请在 GUI 的设置页填写，或设置环境变量 DEEPSEEK_API_KEY。"
+            f"当前用户配置文件：{settings.USER_SETTINGS_PATH}"
+        )
     return OpenAI(api_key=api_key, base_url=settings.DEEPSEEK_BASE_URL)
 
 
@@ -628,6 +608,8 @@ def main(
 
     if video_info and video_info.get("title"):
         logging.info("视频标题：%s", video_info["title"])
+    if video_info and video_info.get("duration"):
+        logging.info("视频时长：%s", format_timestamp(float(video_info["duration"])))
 
     if source != raw_source.strip():
         logging.info("已将输入解析为：%s", source)

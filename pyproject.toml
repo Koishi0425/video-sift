@@ -25,4 +25,4 @@ video-sift = "main:main"
 video-sift-gui = "gui:main"
 
 [tool.setuptools]
-py-modules = ["main", "gui"]
+py-modules = ["main", "gui", "config_utils"]

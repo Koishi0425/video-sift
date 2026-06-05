@@ -173,6 +173,20 @@ git push origin v0.1.0
 
 用户首次启动时，PyAppify 会从 Git 仓库拉取代码、下载隔离 Python 环境并安装依赖。GitHub Actions 方式则会预构建包含 Python、虚拟环境和依赖的数据包，更适合离线或少折腾的发行。
 
+### 发布版配置
+
+发布版不会内置 `settings.py` 或 API Key。首次启动 GUI 时，程序会自动生成用户本地配置文件：
+
+```text
+%APPDATA%\VideoSift\settings.py
+```
+
+用户可以直接在 GUI 的「设置」页面填写 DeepSeek API Key、代理、cookies、默认模型和默认语言；保存后会写入该用户配置文件。命令行版本也会读取同一个用户配置文件。
+
+如果用户配置目录不可写，程序会自动退回到项目/应用目录下的 `.video-sift/settings.py`，仍然不需要用户手动创建配置文件。
+
+如果需要临时指定其他配置文件，可以设置环境变量 `VIDEO_SIFT_SETTINGS` 指向一个自定义 `settings.py`。
+
 ## GUI 优化 TODO
 
 ### P0 应用结构
@@ -204,11 +218,11 @@ git push origin v0.1.0
 
 ### P3 设置与发行
 
-- [ ] 增加设置页面，管理 DeepSeek API、代理、cookies、默认模型、默认语言。
+- [x] 增加设置页面，管理 DeepSeek API、代理、cookies、默认模型、默认语言。
 - [x] 增加依赖检查，提示 ffmpeg、yt-dlp、Whisper 模型缓存等状态。
 - [x] 为 PyAppify 准备稳定 GUI 入口和发行配置。
 - [ ] 增加应用图标、版本号、发行说明和更新说明。
-- [ ] 规划模型缓存、输出目录、配置文件在发行版中的默认位置。
+- [x] 规划模型缓存、输出目录、配置文件在发行版中的默认位置。
 
 ## License
 

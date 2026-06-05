@@ -5,8 +5,9 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
-from PySide6.QtCore import QEasingCurve, QEvent, QParallelAnimationGroup, QProcess, QProcessEnvironment, QPropertyAnimation, QSize, Qt, QUrl
+from PySide6.QtCore import QEasingCurve, QEvent, QParallelAnimationGroup, QProcess, QProcessEnvironment, QPropertyAnimation, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QProgressBar,
+    QLineEdit,
     QScrollArea,
     QSizeGrip,
     QSizePolicy,
@@ -34,6 +36,7 @@ from qfluentwidgets import (
     CheckBox,
     ComboBox,
     FluentIcon as FIF,
+    IndeterminateProgressRing,
     LineEdit,
     NavigationInterface,
     NavigationDisplayMode,
@@ -46,11 +49,13 @@ from qfluentwidgets import (
     Theme,
     setTheme,
 )
+from config_utils import DEFAULT_SETTINGS, load_settings, save_user_settings
 
 
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 DOWNLOAD_PERCENT = re.compile(r"(\d+(?:\.\d+)?)%")
 TASK_DIR_LINE = re.compile(r"任务目录[:：]\s*(.+)")
+BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])")
 
 
 class DropLineEdit(LineEdit):
@@ -83,11 +88,35 @@ class DropZone(QFrame):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(4)
 
-        title = StrongBodyLabel("拖拽本地音视频文件到这里", self)
-        hint = BodyLabel("也可以在上方输入 URL、BV 号，或点击选择文件。", self)
-        hint.setObjectName("mutedLabel")
-        layout.addWidget(title)
-        layout.addWidget(hint)
+        self.loading_ring = IndeterminateProgressRing(self)
+        self.loading_ring.setFixedSize(26, 26)
+        self.loading_ring.setTextVisible(False)
+        self.loading_ring.hide()
+        self.title = StrongBodyLabel("拖拽本地音视频文件到这里", self)
+        self.hint = BodyLabel("也可以在上方输入 URL、BV 号，或点击选择文件。", self)
+        self.hint.setObjectName("mutedLabel")
+        self.title.setWordWrap(True)
+        self.hint.setWordWrap(True)
+        layout.addStretch(1)
+        layout.addWidget(self.loading_ring, 0, Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.title)
+        layout.addWidget(self.hint)
+        layout.addStretch(1)
+
+    def set_preview(self, title: str, hint: str):
+        self.loading_ring.hide()
+        self.title.show()
+        self.hint.show()
+        self.title.setText(title)
+        self.hint.setText(hint)
+
+    def set_loading(self):
+        self.title.hide()
+        self.hint.hide()
+        self.loading_ring.show()
+
+    def reset_preview(self):
+        self.set_preview("拖拽本地音视频文件到这里", "也可以在上方输入 URL、BV 号，或点击选择文件。")
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -179,9 +208,27 @@ class VideoSiftGUI(QWidget):
         setTheme(Theme.DARK)
         self.project_dir = Path(__file__).resolve().parent
         self.outputs_dir = self.project_dir / "outputs"
+        self.app_settings = load_settings(self.project_dir)
+        if not self.app_settings.USER_SETTINGS_PATH.exists():
+            save_user_settings({
+                key: getattr(self.app_settings, key)
+                for key in DEFAULT_SETTINGS
+            }, fallback_dir=self.project_dir)
+            self.app_settings = load_settings(self.project_dir)
         self.current_job_dir: Path | None = None
         self.log_text = ""
         self.last_error = ""
+        self.source_preview_value = ""
+        self.source_preview_process: QProcess | None = None
+        self.source_preview_kind = ""
+        self.source_preview_info: dict | None = None
+        self.source_preview_timer = QTimer(self)
+        self.source_preview_timer.setSingleShot(True)
+        self.source_preview_timer.setInterval(700)
+        self.source_preview_timer.timeout.connect(self.start_source_preview)
+        self.source_preview_timeout_timer = QTimer(self)
+        self.source_preview_timeout_timer.setSingleShot(True)
+        self.source_preview_timeout_timer.timeout.connect(self.source_preview_timed_out)
 
         self.setWindowTitle("Video Sift")
         self.setObjectName("appRoot")
@@ -291,6 +338,7 @@ class VideoSiftGUI(QWidget):
         self.source_input.setPlaceholderText("输入网址、BV 号，或选择本地音视频文件")
         self.source_input.setClearButtonEnabled(True)
         self.source_input.setToolTip("支持完整视频链接、Bilibili BV 号，或本地音视频文件路径。")
+        self.source_input.textChanged.connect(self.schedule_source_preview)
         self.browse_btn = PushButton("选择文件", input_panel)
         self.browse_btn.setIcon(FIF.FOLDER)
         self.browse_btn.clicked.connect(self.browse_file)
@@ -298,7 +346,8 @@ class VideoSiftGUI(QWidget):
         row.addWidget(self.source_input, 1)
         row.addWidget(self.browse_btn)
         input_layout.addLayout(row)
-        input_layout.addWidget(DropZone(self.set_source_path, input_panel))
+        self.source_drop_zone = DropZone(self.set_source_path, input_panel)
+        input_layout.addWidget(self.source_drop_zone)
         layout.addWidget(input_panel)
 
         options_panel = self.panel()
@@ -501,15 +550,68 @@ class VideoSiftGUI(QWidget):
 
     def build_settings_page(self) -> QWidget:
         page, layout = self.scroll_page()
-        layout.addWidget(self.section_header("设置", "管理运行环境和默认参数。第一版先展示关键配置入口与依赖状态。"))
+        layout.addWidget(self.section_header("设置", "管理 API、下载参数和默认处理选项。保存后会写入用户本地配置。"))
 
         panel = self.panel()
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(18, 18, 18, 18)
-        panel_layout.setSpacing(12)
-        panel_layout.addWidget(StrongBodyLabel("配置文件", panel))
-        # panel_layout.addWidget(BodyLabel(f"本地配置：{self.project_dir / 'settings.py'}", panel))
-        panel_layout.addWidget(BodyLabel("可在 settings.py 中管理 DeepSeek、代理、cookies、默认模型和默认语言。", panel))
+        panel_layout = QGridLayout(panel)
+        panel_layout.setContentsMargins(16, 14, 16, 14)
+        panel_layout.setHorizontalSpacing(18)
+        panel_layout.setVerticalSpacing(10)
+        panel_layout.addWidget(StrongBodyLabel("用户配置", panel), 0, 0, 1, 2)
+
+        self.config_path_label = BodyLabel(f"配置文件：{self.current_settings_path()}", panel)
+        self.config_path_label.setObjectName("mutedLabel")
+        panel_layout.addWidget(self.config_path_label, 1, 0, 1, 2)
+
+        self.api_key_input = LineEdit(panel)
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.api_key_input.setClearButtonEnabled(True)
+        self.api_key_input.setPlaceholderText("DeepSeek API Key")
+        self.api_key_input.setToolTip("保存在用户本机配置文件中，不会进入仓库或发行包。")
+
+        self.base_url_input = LineEdit(panel)
+        self.base_url_input.setPlaceholderText("https://api.deepseek.com")
+
+        self.llm_model_input = LineEdit(panel)
+        self.llm_model_input.setPlaceholderText("deepseek-chat")
+
+        self.settings_whisper_cb = ComboBox(panel)
+        self.settings_whisper_cb.addItems(["tiny", "base", "small", "medium", "large"])
+
+        self.settings_language_cb = ComboBox(panel)
+        self.settings_language_cb.addItems(["auto", "zh", "en", "ja"])
+
+        self.proxy_input = LineEdit(panel)
+        self.proxy_input.setPlaceholderText("例如 http://127.0.0.1:7890，可留空")
+
+        self.cookies_browser_input = LineEdit(panel)
+        self.cookies_browser_input.setPlaceholderText("chrome / edge / firefox，可留空")
+
+        self.cookies_file_input = LineEdit(panel)
+        self.cookies_file_input.setPlaceholderText("cookies.txt 路径，可留空")
+
+        self.add_field(panel_layout, "DeepSeek API Key", self.api_key_input, 2, 0)
+        self.add_field(panel_layout, "DeepSeek Base URL", self.base_url_input, 2, 1)
+        self.add_field(panel_layout, "默认 LLM 模型", self.llm_model_input, 3, 0)
+        self.add_field(panel_layout, "默认 Whisper 模型", self.settings_whisper_cb, 3, 1)
+        self.add_field(panel_layout, "默认转写语言", self.settings_language_cb, 4, 0)
+        self.add_field(panel_layout, "yt-dlp 代理", self.proxy_input, 4, 1)
+        self.add_field(panel_layout, "浏览器 Cookies", self.cookies_browser_input, 5, 0)
+        self.add_field(panel_layout, "Cookies 文件", self.cookies_file_input, 5, 1)
+
+        action_row = QHBoxLayout()
+        self.save_settings_btn = PrimaryPushButton("保存设置", panel)
+        self.save_settings_btn.setIcon(FIF.SAVE)
+        self.save_settings_btn.clicked.connect(self.save_settings_form)
+        self.open_settings_dir_btn = PushButton("打开配置目录", panel)
+        self.open_settings_dir_btn.setIcon(FIF.FOLDER)
+        self.open_settings_dir_btn.clicked.connect(self.open_settings_dir)
+        self.settings_status_label = BodyLabel("设置会自动保存到用户本机配置目录。", panel)
+        self.settings_status_label.setObjectName("mutedLabel")
+        action_row.addWidget(self.save_settings_btn)
+        action_row.addWidget(self.open_settings_dir_btn)
+        action_row.addWidget(self.settings_status_label, 1)
+        panel_layout.addLayout(action_row, 6, 0, 1, 2)
         layout.addWidget(panel)
 
         deps = self.panel()
@@ -521,6 +623,7 @@ class VideoSiftGUI(QWidget):
             deps_layout.addWidget(BodyLabel(f"{'已找到' if ok else '未找到'}：{name}", deps))
         layout.addWidget(deps)
         layout.addStretch(1)
+        self.load_settings_form()
         return page
 
     def build_about_page(self) -> QWidget:
@@ -689,6 +792,329 @@ class VideoSiftGUI(QWidget):
 
     def set_source_path(self, path: str):
         self.source_input.setText(path)
+
+    def schedule_source_preview(self, value: str):
+        value = value.strip()
+        self.source_preview_value = value
+        self.source_preview_info = None
+        self.source_preview_timer.stop()
+        self.cancel_source_preview_process()
+
+        if not value:
+            self.source_drop_zone.reset_preview()
+            return
+
+        local_path = self.preview_local_path(value)
+        if local_path:
+            self.source_drop_zone.set_loading()
+            self.source_preview_timer.setInterval(120)
+            self.source_preview_timer.start()
+            return
+
+        normalized = self.normalize_preview_source(value)
+        if self.is_preview_url(normalized):
+            self.source_drop_zone.set_loading()
+            self.source_preview_timer.setInterval(700)
+            self.source_preview_timer.start()
+            return
+
+        self.source_drop_zone.set_preview("等待有效来源", "请输入完整视频链接、Bilibili BV 号，或拖入本地媒体文件。")
+
+    def start_source_preview(self):
+        value = self.source_preview_value
+        if not value:
+            self.source_drop_zone.reset_preview()
+            return
+
+        local_path = self.preview_local_path(value)
+        if local_path:
+            self.start_local_duration_preview(local_path, value)
+            return
+
+        normalized = self.normalize_preview_source(value)
+        if self.is_preview_url(normalized):
+            self.start_url_info_preview(normalized, value)
+            return
+
+        self.source_drop_zone.set_preview("无法识别来源", "请检查链接、BV 号或本地文件路径是否完整。")
+
+    def start_local_duration_preview(self, path: Path, value: str):
+        if shutil.which("ffprobe") is None:
+            self.show_local_source_preview(path, duration=None)
+            return
+
+        self.source_preview_kind = "file"
+        process = QProcess(self)
+        process.finished.connect(
+            lambda exit_code, exit_status, proc=process, source_value=value: self.source_preview_finished(
+                proc, source_value, "file", exit_code, exit_status
+            )
+        )
+        self.source_preview_process = process
+        self.source_preview_timeout_timer.start(5000)
+        process.start(
+            "ffprobe",
+            [
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+        )
+
+    def start_url_info_preview(self, source: str, value: str):
+        if shutil.which("yt-dlp") is None:
+            self.source_drop_zone.set_preview("未找到 yt-dlp", "无法预览在线视频信息；安装依赖后可解析标题和时长。")
+            return
+
+        self.source_drop_zone.set_loading()
+        self.source_preview_kind = "url"
+        process = QProcess(self)
+        process.finished.connect(
+            lambda exit_code, exit_status, proc=process, source_value=value: self.source_preview_finished(
+                proc, source_value, "url", exit_code, exit_status
+            )
+        )
+        self.source_preview_process = process
+        self.source_preview_timeout_timer.start(20000)
+        process.setWorkingDirectory(str(self.project_dir))
+        process.start(
+            "yt-dlp",
+            [
+                "--dump-single-json",
+                "--no-playlist",
+                "--skip-download",
+                *self.ytdlp_preview_args(source),
+                source,
+            ],
+        )
+
+    def source_preview_finished(self, process: QProcess, source_value: str, kind: str, exit_code: int, exit_status):
+        stdout = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace").strip()
+        stderr = bytes(process.readAllStandardError()).decode("utf-8", errors="replace").strip()
+        process.deleteLater()
+
+        if process is not self.source_preview_process or source_value != self.source_preview_value:
+            return
+
+        self.source_preview_process = None
+        self.source_preview_timeout_timer.stop()
+
+        if kind == "file":
+            path = self.preview_local_path(source_value)
+            if not path:
+                self.source_drop_zone.set_preview("文件不存在", "请重新选择本地音视频文件。")
+                return
+            duration = self.parse_duration(stdout) if exit_code == 0 else None
+            self.show_local_source_preview(path, duration=duration)
+            return
+
+        if exit_code != 0 or not stdout:
+            detail = self.short_error(stderr) or "暂时无法解析链接信息，仍可直接开始处理。"
+            self.source_drop_zone.set_preview("链接信息暂不可用", detail)
+            return
+
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            self.source_drop_zone.set_preview("链接信息暂不可用", "返回信息无法读取，仍可直接开始处理。")
+            return
+
+        info = {
+            "kind": "url",
+            "title": data.get("title"),
+            "uploader": data.get("uploader"),
+            "duration": data.get("duration"),
+            "extractor": data.get("extractor_key") or data.get("extractor"),
+            "view_count": data.get("view_count"),
+            "webpage_url": data.get("webpage_url"),
+        }
+        self.source_preview_info = info
+        self.show_url_source_preview(info)
+
+    def source_preview_timed_out(self):
+        process = self.source_preview_process
+        if not process:
+            return
+
+        kind = self.source_preview_kind
+        self.source_preview_process = None
+        process.kill()
+        process.deleteLater()
+        if kind == "file":
+            path = self.preview_local_path(self.source_preview_value)
+            if path:
+                self.show_local_source_preview(path, duration=None)
+            return
+
+        self.source_drop_zone.set_preview("解析耗时较长", "可以先开始处理；任务运行时会再次获取视频标题和信息。")
+
+    def cancel_source_preview_process(self):
+        self.source_preview_timeout_timer.stop()
+        process = self.source_preview_process
+        self.source_preview_process = None
+        if process and process.state() != QProcess.ProcessState.NotRunning:
+            process.kill()
+        if process:
+            process.deleteLater()
+
+    def show_local_source_preview(self, path: Path, duration: float | None):
+        meta = [f"大小 {self.format_file_size(path.stat().st_size)}"]
+        if duration:
+            meta.append(f"时长 {self.format_duration(duration)}")
+            estimate = self.estimate_processing_time(duration)
+            if estimate:
+                meta.append(f"粗略预计 {estimate}")
+        else:
+            meta.append("时长暂不可用")
+        self.source_preview_info = {
+            "kind": "file",
+            "path": str(path),
+            "duration": duration,
+            "size": path.stat().st_size,
+        }
+        self.source_drop_zone.set_preview(f"已选择：{path.name}", " · ".join(meta))
+
+    def show_url_source_preview(self, info: dict):
+        title = str(info.get("title") or "已识别在线视频")
+        meta = []
+        if info.get("uploader"):
+            meta.append(f"作者 {info['uploader']}")
+        duration = self.parse_duration(info.get("duration"))
+        if duration:
+            meta.append(f"时长 {self.format_duration(duration)}")
+            estimate = self.estimate_processing_time(duration)
+            if estimate:
+                meta.append(f"粗略预计 {estimate}")
+        if info.get("view_count") is not None:
+            meta.append(f"播放 {self.format_count(info['view_count'])}")
+        if info.get("extractor"):
+            meta.append(str(info["extractor"]))
+        self.source_drop_zone.set_preview(title, " · ".join(meta) or "已获取视频基础信息。")
+
+    def preview_local_path(self, value: str) -> Path | None:
+        if self.is_preview_url(value):
+            return None
+        candidate = value.strip().strip('"')
+        if not candidate:
+            return None
+        try:
+            path = Path(candidate).expanduser()
+            if path.exists() and path.is_file():
+                return path.resolve()
+        except OSError:
+            return None
+        return None
+
+    def normalize_preview_source(self, value: str) -> str:
+        source = value.strip()
+        if self.is_preview_url(source):
+            return source
+        match = BILIBILI_BVID_PATTERN.search(source)
+        if match:
+            bvid = match.group(0)
+            return f"https://www.bilibili.com/video/BV{bvid[2:]}"
+        return source
+
+    def is_preview_url(self, value: str) -> bool:
+        parsed = urlparse(value.strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    def ytdlp_preview_args(self, source: str) -> list[str]:
+        args = []
+        proxy = getattr(self.app_settings, "YTDLP_PROXY", "")
+        if proxy and ("youtube.com" in source or "youtu.be" in source):
+            args.extend(["--proxy", proxy])
+
+        user_agent = getattr(self.app_settings, "YTDLP_USER_AGENT", "")
+        if user_agent:
+            args.extend(["--user-agent", user_agent])
+
+        if urlparse(source).netloc.lower().endswith("bilibili.com"):
+            headers = getattr(self.app_settings, "YTDLP_BILIBILI_HEADERS", {}) or {}
+            for name, value in headers.items():
+                if value:
+                    args.extend(["--add-headers", f"{name}:{value}"])
+
+        cookies_file = getattr(self.app_settings, "YTDLP_COOKIES_FILE", "")
+        if cookies_file:
+            args.extend(["--cookies", str(Path(cookies_file).expanduser())])
+
+        cookies_from_browser = getattr(self.app_settings, "YTDLP_COOKIES_FROM_BROWSER", "")
+        if cookies_from_browser:
+            args.extend(["--cookies-from-browser", cookies_from_browser])
+        return args
+
+    def parse_duration(self, value) -> float | None:
+        if value is None:
+            return None
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        return seconds if seconds > 0 else None
+
+    def format_duration(self, seconds: float) -> str:
+        total = int(seconds)
+        hours = total // 3600
+        minutes = (total % 3600) // 60
+        secs = total % 60
+        if hours:
+            return f"{hours}:{minutes:02d}:{secs:02d}"
+        return f"{minutes}:{secs:02d}"
+
+    def format_file_size(self, size: int) -> str:
+        value = float(size)
+        for unit in ("B", "KB", "MB", "GB"):
+            if value < 1024 or unit == "GB":
+                return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+            value /= 1024
+        return f"{value:.1f} GB"
+
+    def format_count(self, value) -> str:
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if count >= 10000:
+            return f"{count / 10000:.1f} 万"
+        return str(count)
+
+    def estimate_processing_time(self, duration: float) -> str:
+        mode = self.mode_cb.currentText() if hasattr(self, "mode_cb") else "完整处理"
+        model = self.model_cb.currentText() if hasattr(self, "model_cb") else "base"
+        duration_minutes = duration / 60
+        model_factor = {
+            "tiny": 0.25,
+            "base": 0.4,
+            "small": 0.75,
+            "medium": 1.2,
+            "large": 1.8,
+        }.get(model, 0.5)
+
+        if mode == "仅下载音频":
+            estimate = max(1, duration_minutes * 0.08)
+        elif mode == "仅重新总结":
+            return "取决于已有转写长度"
+        elif mode == "仅语音转文字":
+            estimate = max(1, duration_minutes * model_factor)
+        else:
+            estimate = max(1, duration_minutes * model_factor) + max(1, duration_minutes * 0.08)
+
+        low = max(1, int(estimate * 0.8))
+        high = max(low + 1, int(estimate * 1.5) + 1)
+        if high < 60:
+            return f"{low}-{high} 分钟"
+        return f"{high // 60} 小时内"
+
+    def short_error(self, text: str) -> str:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        return lines[-1][:160]
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -971,6 +1397,48 @@ class VideoSiftGUI(QWidget):
         self.source_input.setText(source)
         self.mode_cb.setCurrentText("仅重新总结")
         self.switch_page(0)
+
+    def load_settings_form(self):
+        settings = self.app_settings
+        self.config_path_label.setText(f"配置文件：{self.current_settings_path()}")
+        self.api_key_input.setText(settings.DEEPSEEK_API_KEY)
+        self.base_url_input.setText(settings.DEEPSEEK_BASE_URL)
+        self.llm_model_input.setText(settings.DEFAULT_LLM_MODEL)
+        self.settings_whisper_cb.setCurrentText(settings.DEFAULT_WHISPER_MODEL)
+        self.settings_language_cb.setCurrentText(settings.DEFAULT_TRANSCRIBE_LANGUAGE)
+        self.proxy_input.setText(settings.YTDLP_PROXY)
+        self.cookies_browser_input.setText(settings.YTDLP_COOKIES_FROM_BROWSER)
+        self.cookies_file_input.setText(settings.YTDLP_COOKIES_FILE)
+        self.model_cb.setCurrentText(settings.DEFAULT_WHISPER_MODEL)
+        self.lang_cb.setCurrentText(settings.DEFAULT_TRANSCRIBE_LANGUAGE)
+
+    def save_settings_form(self):
+        values = {
+            "DEEPSEEK_API_KEY": self.api_key_input.text().strip(),
+            "DEEPSEEK_BASE_URL": self.base_url_input.text().strip() or "https://api.deepseek.com",
+            "DEFAULT_LLM_MODEL": self.llm_model_input.text().strip() or "deepseek-chat",
+            "DEFAULT_DETECT_WHISPER_MODEL": "tiny",
+            "DEFAULT_WHISPER_MODEL": self.settings_whisper_cb.currentText(),
+            "DEFAULT_TRANSCRIBE_LANGUAGE": self.settings_language_cb.currentText(),
+            "DEFAULT_WORKDIR": "outputs",
+            "MAX_CHUNK_MINUTES": 25,
+            "SUMMARY_CHUNK_CHARS": 12000,
+            "YTDLP_PROXY": self.proxy_input.text().strip(),
+            "YTDLP_COOKIES_FROM_BROWSER": self.cookies_browser_input.text().strip(),
+            "YTDLP_COOKIES_FILE": self.cookies_file_input.text().strip(),
+        }
+        path = save_user_settings(values, fallback_dir=self.project_dir)
+        self.app_settings = load_settings(self.project_dir)
+        self.load_settings_form()
+        self.settings_status_label.setText(f"已保存：{path}")
+
+    def open_settings_dir(self):
+        path = self.current_settings_path().parent
+        path.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def current_settings_path(self) -> Path:
+        return self.app_settings.CONFIG_SOURCE_PATH or self.app_settings.USER_SETTINGS_PATH
 
     def dependency_status(self) -> dict[str, bool]:
         return {

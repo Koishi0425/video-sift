@@ -8,6 +8,7 @@ env/
 # Project specific
 outputs/
 settings.py
+.video-sift/
 *.log
 todo.txt
 ~/
