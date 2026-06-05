@@ -57,13 +57,15 @@ jobs:
       - name: Clean generated directories
         shell: pwsh
         run: |
+          $workspace = (Get-Location).Path
           $paths = @(
             "outputs", ".venv", "venv", "env", "__pycache__", "video_sift.egg-info",
             "pyappify_build", "pyappify_dist", "data", "logs", "cache", "~"
           )
           foreach ($path in $paths) {
-            if (Test-Path $path) {
-              Remove-Item -LiteralPath $path -Recurse -Force
+            $target = Join-Path $workspace $path
+            if (Test-Path -LiteralPath $target) {
+              Remove-Item -LiteralPath $target -Recurse -Force
             }
           }
 
