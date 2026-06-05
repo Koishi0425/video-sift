@@ -5,3 +5,4 @@ profiles:
     main_script: "gui.py"
     requires_python: "3.12"
     requirements: "requirements.txt"
+    use_pythonw: true

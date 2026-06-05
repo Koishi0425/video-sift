@@ -164,6 +164,10 @@ git push origin v0.1.0
 
 也可以在 GitHub Actions 页面手动运行 `PyAppify Release` workflow。手动运行会生成 `video-sift-pyappify` artifact，适合测试打包结果，但不会自动创建 Release。
 
+手动运行 workflow 时可以勾选 `build_exe_only`。这个模式只构建 PyAppify launcher exe，适合快速验证图标、配置和入口脚本；正式发布标签不要启用它，因为完整发行包仍需要预构建 Python、虚拟环境和依赖。
+
+包含 `PySide6`、`openai-whisper`、`torch` 的完整发行包会比较大。GitHub Actions 在 `makensis` 阶段压缩安装包时可能耗时 15-30 分钟，这是正常现象。workflow 会在构建前检查并清理常见生成目录，避免把 `outputs/`、缓存、虚拟环境或大文件误带进发行包。
+
 ### 轻量启动器发行
 
 如果只想分发轻量启动器，将以下文件放在同一目录：
@@ -182,6 +186,10 @@ git push origin v0.1.0
 ```
 
 用户可以直接在 GUI 的「设置」页面填写 DeepSeek API Key、代理、cookies、默认模型和默认语言；保存后会写入该用户配置文件。命令行版本也会读取同一个用户配置文件。
+
+`ffmpeg` 和 `ffprobe` 通常不需要手动填写路径。程序会先从当前环境变量查找，再读取 Windows 用户/系统 PATH，并额外检查 Scoop、Chocolatey 的常见安装目录。只有发布版仍然检测不到时，才需要在 GUI「设置」页面填写 `ffmpeg.exe` / `ffprobe.exe` 的完整路径。
+
+发布版会使用内置 Python 环境运行 `yt-dlp` Python 模块，因此不要求用户额外把 `yt-dlp.exe` 放进 PATH。`outputs` 目录也会在首次运行任务时自动创建，不应作为缺失依赖处理。
 
 如果用户配置目录不可写，程序会自动退回到项目/应用目录下的 `.video-sift/settings.py`，仍然不需要用户手动创建配置文件。
 

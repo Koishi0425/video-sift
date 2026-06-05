@@ -1,5 +1,6 @@
 import json
 import ctypes
+import importlib.util
 import re
 import shutil
 import sys
@@ -49,7 +50,7 @@ from qfluentwidgets import (
     Theme,
     setTheme,
 )
-from config_utils import DEFAULT_SETTINGS, load_settings, save_user_settings
+from config_utils import DEFAULT_SETTINGS, find_executable, load_settings, save_user_settings
 
 
 ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -590,6 +591,14 @@ class VideoSiftGUI(QWidget):
         self.cookies_file_input = LineEdit(panel)
         self.cookies_file_input.setPlaceholderText("cookies.txt 路径，可留空")
 
+        self.ffmpeg_path_input = LineEdit(panel)
+        self.ffmpeg_path_input.setPlaceholderText("ffmpeg.exe 路径，可留空")
+        self.ffmpeg_path_input.setToolTip("如果发行版检测不到 PATH 中的 ffmpeg，可在这里填写 ffmpeg.exe 的完整路径。")
+
+        self.ffprobe_path_input = LineEdit(panel)
+        self.ffprobe_path_input.setPlaceholderText("ffprobe.exe 路径，可留空")
+        self.ffprobe_path_input.setToolTip("通常和 ffmpeg.exe 在同一个 bin 目录。用于本地文件预览和音频格式检测。")
+
         self.add_field(panel_layout, "DeepSeek API Key", self.api_key_input, 2, 0)
         self.add_field(panel_layout, "DeepSeek Base URL", self.base_url_input, 2, 1)
         self.add_field(panel_layout, "默认 LLM 模型", self.llm_model_input, 3, 0)
@@ -598,6 +607,8 @@ class VideoSiftGUI(QWidget):
         self.add_field(panel_layout, "yt-dlp 代理", self.proxy_input, 4, 1)
         self.add_field(panel_layout, "浏览器 Cookies", self.cookies_browser_input, 5, 0)
         self.add_field(panel_layout, "Cookies 文件", self.cookies_file_input, 5, 1)
+        self.add_field(panel_layout, "ffmpeg 路径", self.ffmpeg_path_input, 6, 0)
+        self.add_field(panel_layout, "ffprobe 路径", self.ffprobe_path_input, 6, 1)
 
         action_row = QHBoxLayout()
         self.save_settings_btn = PrimaryPushButton("保存设置", panel)
@@ -611,7 +622,7 @@ class VideoSiftGUI(QWidget):
         action_row.addWidget(self.save_settings_btn)
         action_row.addWidget(self.open_settings_dir_btn)
         action_row.addWidget(self.settings_status_label, 1)
-        panel_layout.addLayout(action_row, 6, 0, 1, 2)
+        panel_layout.addLayout(action_row, 7, 0, 1, 2)
         layout.addWidget(panel)
 
         deps = self.panel()
@@ -839,7 +850,8 @@ class VideoSiftGUI(QWidget):
         self.source_drop_zone.set_preview("无法识别来源", "请检查链接、BV 号或本地文件路径是否完整。")
 
     def start_local_duration_preview(self, path: Path, value: str):
-        if shutil.which("ffprobe") is None:
+        ffprobe = self.resolve_executable("ffprobe", "FFPROBE_PATH")
+        if ffprobe is None:
             self.show_local_source_preview(path, duration=None)
             return
 
@@ -853,7 +865,7 @@ class VideoSiftGUI(QWidget):
         self.source_preview_process = process
         self.source_preview_timeout_timer.start(5000)
         process.start(
-            "ffprobe",
+            ffprobe,
             [
                 "-v",
                 "error",
@@ -866,8 +878,8 @@ class VideoSiftGUI(QWidget):
         )
 
     def start_url_info_preview(self, source: str, value: str):
-        if shutil.which("yt-dlp") is None:
-            self.source_drop_zone.set_preview("未找到 yt-dlp", "无法预览在线视频信息；安装依赖后可解析标题和时长。")
+        if not self.ytdlp_module_available():
+            self.source_drop_zone.set_preview("未找到 yt-dlp 模块", "无法预览在线视频信息；安装依赖后可解析标题和时长。")
             return
 
         self.source_drop_zone.set_loading()
@@ -882,8 +894,10 @@ class VideoSiftGUI(QWidget):
         self.source_preview_timeout_timer.start(20000)
         process.setWorkingDirectory(str(self.project_dir))
         process.start(
-            "yt-dlp",
+            sys.executable,
             [
+                "-m",
+                "yt_dlp",
                 "--dump-single-json",
                 "--no-playlist",
                 "--skip-download",
@@ -1409,6 +1423,8 @@ class VideoSiftGUI(QWidget):
         self.proxy_input.setText(settings.YTDLP_PROXY)
         self.cookies_browser_input.setText(settings.YTDLP_COOKIES_FROM_BROWSER)
         self.cookies_file_input.setText(settings.YTDLP_COOKIES_FILE)
+        self.ffmpeg_path_input.setText(getattr(settings, "FFMPEG_PATH", ""))
+        self.ffprobe_path_input.setText(getattr(settings, "FFPROBE_PATH", ""))
         self.model_cb.setCurrentText(settings.DEFAULT_WHISPER_MODEL)
         self.lang_cb.setCurrentText(settings.DEFAULT_TRANSCRIBE_LANGUAGE)
 
@@ -1426,6 +1442,8 @@ class VideoSiftGUI(QWidget):
             "YTDLP_PROXY": self.proxy_input.text().strip(),
             "YTDLP_COOKIES_FROM_BROWSER": self.cookies_browser_input.text().strip(),
             "YTDLP_COOKIES_FILE": self.cookies_file_input.text().strip(),
+            "FFMPEG_PATH": self.ffmpeg_path_input.text().strip(),
+            "FFPROBE_PATH": self.ffprobe_path_input.text().strip(),
         }
         path = save_user_settings(values, fallback_dir=self.project_dir)
         self.app_settings = load_settings(self.project_dir)
@@ -1442,11 +1460,19 @@ class VideoSiftGUI(QWidget):
 
     def dependency_status(self) -> dict[str, bool]:
         return {
-            "ffmpeg": shutil.which("ffmpeg") is not None,
-            "yt-dlp": shutil.which("yt-dlp") is not None,
-            "outputs 目录": self.outputs_dir.exists(),
+            "ffmpeg": self.resolve_executable("ffmpeg", "FFMPEG_PATH") is not None,
+            "ffprobe": self.resolve_executable("ffprobe", "FFPROBE_PATH") is not None,
+            "yt-dlp Python 模块": self.ytdlp_module_available(),
+            "outputs 目录（首次运行会自动创建）": True,
             "Whisper 缓存目录": (Path.home() / ".cache" / "whisper").exists(),
         }
+
+    def resolve_executable(self, command: str, setting_name: str | None = None) -> str | None:
+        configured = getattr(self.app_settings, setting_name, "") if setting_name else ""
+        return find_executable(command, configured)
+
+    def ytdlp_module_available(self) -> bool:
+        return importlib.util.find_spec("yt_dlp") is not None
 
     def apply_styles(self):
         self.setStyleSheet(

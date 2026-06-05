@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,6 +32,8 @@ DEFAULT_SETTINGS = {
     },
     "YTDLP_COOKIES_FROM_BROWSER": "",
     "YTDLP_COOKIES_FILE": "",
+    "FFMPEG_PATH": "",
+    "FFPROBE_PATH": "",
 }
 
 
@@ -128,6 +131,9 @@ YTDLP_BILIBILI_HEADERS = {{
 }}
 YTDLP_COOKIES_FROM_BROWSER = {data.get("YTDLP_COOKIES_FROM_BROWSER", "")!r}
 YTDLP_COOKIES_FILE = {data.get("YTDLP_COOKIES_FILE", "")!r}
+
+FFMPEG_PATH = {data.get("FFMPEG_PATH", "")!r}
+FFPROBE_PATH = {data.get("FFPROBE_PATH", "")!r}
 '''
 
 
@@ -141,3 +147,56 @@ def save_user_settings(values: dict, fallback_dir: Path | None = None) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(settings_template(values), encoding="utf-8")
     return path
+
+
+def windows_registry_paths() -> list[str]:
+    if os.name != "nt":
+        return []
+
+    paths: list[str] = []
+    try:
+        import winreg
+
+        keys = [
+            (winreg.HKEY_CURRENT_USER, r"Environment"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+        ]
+        for root, subkey in keys:
+            try:
+                with winreg.OpenKey(root, subkey) as key:
+                    value, _ = winreg.QueryValueEx(key, "Path")
+                    paths.extend(str(value).split(os.pathsep))
+            except OSError:
+                continue
+    except ImportError:
+        return []
+
+    return [os.path.expandvars(path) for path in paths if path]
+
+
+def common_windows_tool_paths() -> list[str]:
+    if os.name != "nt":
+        return []
+
+    candidates = [
+        Path.home() / "scoop" / "shims",
+        Path(os.environ.get("ProgramData", r"C:\ProgramData")) / "chocolatey" / "bin",
+    ]
+    return [str(path) for path in candidates if path.exists()]
+
+
+def find_executable(command: str, configured: str = "") -> str | None:
+    if configured:
+        path = Path(configured).expanduser()
+        if path.exists():
+            return str(path)
+
+    found = shutil.which(command)
+    if found:
+        return found
+
+    extra_paths = os.pathsep.join(windows_registry_paths() + common_windows_tool_paths())
+    if extra_paths:
+        return shutil.which(command, path=extra_paths)
+
+    return None

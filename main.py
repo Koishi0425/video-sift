@@ -14,7 +14,7 @@ import click
 from openai import OpenAI
 import whisper
 from pydub import AudioSegment
-from config_utils import load_settings
+from config_utils import find_executable, load_settings
 
 
 settings = load_settings(Path(__file__).resolve().parent)
@@ -225,8 +225,25 @@ def is_url(value: str) -> bool:
 
 
 def ensure_ffmpeg_available() -> None:
-    if shutil.which("ffmpeg") is None:
-        raise click.ClickException("未检测到 ffmpeg。请先安装 ffmpeg，并确保它在 PATH 中。")
+    if resolve_executable("ffmpeg", "FFMPEG_PATH") is None:
+        raise click.ClickException("未检测到 ffmpeg。请先安装 ffmpeg 并确保它在 PATH 中，或在设置页填写 ffmpeg.exe 路径。")
+
+
+def resolve_executable(command: str, setting_name: str | None = None) -> str | None:
+    configured = getattr(settings, setting_name, "") if setting_name else ""
+    return find_executable(command, configured)
+
+
+def ffmpeg_command() -> str:
+    return resolve_executable("ffmpeg", "FFMPEG_PATH") or "ffmpeg"
+
+
+def ffprobe_command() -> str:
+    return resolve_executable("ffprobe", "FFPROBE_PATH") or "ffprobe"
+
+
+def ytdlp_command() -> list[str]:
+    return [sys.executable, "-m", "yt_dlp"]
 
 
 def prepare_workdir(workdir: Path) -> None:
@@ -285,7 +302,7 @@ def fetch_video_info(source: str) -> dict | None:
         return None
 
     command = [
-        "yt-dlp",
+        *ytdlp_command(),
         "--dump-single-json",
         "--no-playlist",
         "--skip-download",
@@ -328,7 +345,7 @@ def format_timestamp(seconds: float) -> str:
 
 def _probe_audio_codec(filepath: Path) -> str | None:
     command = [
-        "ffprobe",
+        ffprobe_command(),
         "-v", "error",
         "-select_streams", "a:0",
         "-show_entries", "stream=codec_name",
@@ -349,7 +366,7 @@ def extract_audio(source: str, workdir: Path) -> Path:
 
     if is_url(source):
         command = [
-            "yt-dlp",
+            *ytdlp_command(),
             "-x",
             "--audio-format",
             "mp3",
@@ -378,10 +395,10 @@ def extract_audio(source: str, workdir: Path) -> Path:
     codec = _probe_audio_codec(input_path)
     if codec == "mp3":
         logging.info("输入文件音频已是 mp3 编码，直接提取并跳过转码")
-        command = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-acodec", "copy", str(audio_path)]
+        command = [ffmpeg_command(), "-y", "-i", str(input_path), "-vn", "-acodec", "copy", str(audio_path)]
     else:
         logging.info("输入文件编码为 %s，转码为 mp3", codec or "未知")
-        command = ["ffmpeg", "-y", "-i", str(input_path), "-vn", "-acodec", "libmp3lame", str(audio_path)]
+        command = [ffmpeg_command(), "-y", "-i", str(input_path), "-vn", "-acodec", "libmp3lame", str(audio_path)]
         
     logging.debug("执行音频提取命令：%s", " ".join(command))
     subprocess.run(command, check=True)

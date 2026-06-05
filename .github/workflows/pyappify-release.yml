@@ -5,6 +5,12 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      build_exe_only:
+        description: "Only build the PyAppify launcher exe. Faster for smoke tests; tag releases should keep this disabled."
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -13,16 +19,70 @@ jobs:
   build:
     name: Build Windows package
     runs-on: windows-latest
+    env:
+      PIP_CACHE_DIR: ${{ runner.temp }}\pip-cache
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Guard repository payload
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tracked = git ls-files
+          $forbidden = $tracked | Where-Object {
+            $_ -match '^(outputs|\.venv|venv|env|__pycache__|video_sift\.egg-info|pyappify_build|pyappify_dist|data|logs|cache|~)/'
+          }
+          if ($forbidden) {
+            Write-Host "Forbidden tracked files:"
+            $forbidden | ForEach-Object { Write-Host " - $_" }
+            throw "Remove generated/cache files from git before building."
+          }
+
+          $large = @()
+          foreach ($file in $tracked) {
+            if (Test-Path $file) {
+              $item = Get-Item $file
+              if ($item.Length -gt 10MB) {
+                $large += [PSCustomObject]@{ File = $file; SizeMB = [Math]::Round($item.Length / 1MB, 1) }
+              }
+            }
+          }
+          if ($large) {
+            $large | Format-Table -AutoSize
+            throw "Tracked files above 10 MB may make PyAppify packaging slow."
+          }
+
+      - name: Clean generated directories
+        shell: pwsh
+        run: |
+          $paths = @(
+            "outputs", ".venv", "venv", "env", "__pycache__", "video_sift.egg-info",
+            "pyappify_build", "pyappify_dist", "data", "logs", "cache", "~"
+          )
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              Remove-Item -LiteralPath $path -Recurse -Force
+            }
+          }
+
+      - name: Restore pip cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PIP_CACHE_DIR }}
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt', 'pyproject.toml') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
 
       - name: Build with PyAppify
         id: build-app
         uses: ok-oldking/pyappify-action@master
         with:
           version: "v1.1.3"
+          build_exe_only: ${{ github.event_name == 'workflow_dispatch' && inputs.build_exe_only }}
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

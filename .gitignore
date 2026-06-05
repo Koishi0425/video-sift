@@ -22,3 +22,6 @@ dist/
 data/
 logs/
 cache/
+.video-sift/
+tmp_appdata_test_*/
+tmp_no_project_settings/

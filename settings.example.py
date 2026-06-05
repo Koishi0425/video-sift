@@ -32,3 +32,7 @@ YTDLP_BILIBILI_HEADERS = {
 # 二选一：需要登录态或仍遇到 412 时启用。浏览器名称示例：chrome、edge、firefox。
 YTDLP_COOKIES_FROM_BROWSER = ""
 YTDLP_COOKIES_FILE = ""
+
+# 可选：发行版检测不到 PATH 时，在 GUI 设置页填写完整路径会写入这些配置。
+FFMPEG_PATH = ""
+FFPROBE_PATH = ""
