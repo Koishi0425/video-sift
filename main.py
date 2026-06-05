@@ -13,11 +13,28 @@ from urllib.parse import parse_qs, urlparse
 import click
 from openai import OpenAI
 import whisper
-from pydub import AudioSegment
 from config_utils import find_executable, load_settings
 
 
 settings = load_settings(Path(__file__).resolve().parent)
+
+
+def bootstrap_tool_path() -> None:
+    tool_dirs = []
+    for command, setting_name in (("ffmpeg", "FFMPEG_PATH"), ("ffprobe", "FFPROBE_PATH")):
+        configured = getattr(settings, setting_name, "")
+        path = find_executable(command, configured)
+        if path:
+            tool_dirs.append(str(Path(path).parent))
+
+    if tool_dirs:
+        current_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = os.pathsep.join([*dict.fromkeys(tool_dirs), current_path])
+
+
+bootstrap_tool_path()
+
+from pydub import AudioSegment
 
 
 SYSTEM_PROMPT = """你是一个逻辑严密的知识提炼专家。用户会给你一份从视频中提取的语音识别文本。这个视频的 up主讲解可能缺乏条理、内容跳脱、有很多口水话。你的任务是：
@@ -242,8 +259,48 @@ def ffprobe_command() -> str:
     return resolve_executable("ffprobe", "FFPROBE_PATH") or "ffprobe"
 
 
+def python_command() -> str:
+    executable = Path(sys.executable)
+    if executable.name.lower() == "pythonw.exe":
+        console_python = executable.with_name("python.exe")
+        if console_python.exists():
+            return str(console_python)
+    return sys.executable
+
+
 def ytdlp_command() -> list[str]:
-    return [sys.executable, "-m", "yt_dlp"]
+    return [python_command(), "-m", "yt_dlp"]
+
+
+def ffmpeg_location_args() -> list[str]:
+    ffmpeg = resolve_executable("ffmpeg", "FFMPEG_PATH")
+    if not ffmpeg:
+        return []
+    return ["--ffmpeg-location", str(Path(ffmpeg).parent)]
+
+
+def tool_env() -> dict[str, str]:
+    env = os.environ.copy()
+    tool_dirs = []
+    for command, setting_name in (("ffmpeg", "FFMPEG_PATH"), ("ffprobe", "FFPROBE_PATH")):
+        path = resolve_executable(command, setting_name)
+        if path:
+            tool_dirs.append(str(Path(path).parent))
+
+    if tool_dirs:
+        current_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([*dict.fromkeys(tool_dirs), current_path])
+
+    return env
+
+
+def configure_audio_tools() -> None:
+    ffmpeg = resolve_executable("ffmpeg", "FFMPEG_PATH")
+    ffprobe = resolve_executable("ffprobe", "FFPROBE_PATH")
+    if ffmpeg:
+        AudioSegment.converter = ffmpeg
+    if ffprobe:
+        AudioSegment.ffprobe = ffprobe
 
 
 def prepare_workdir(workdir: Path) -> None:
@@ -306,6 +363,7 @@ def fetch_video_info(source: str) -> dict | None:
         "--dump-single-json",
         "--no-playlist",
         "--skip-download",
+        *ffmpeg_location_args(),
         *ytdlp_request_args(source),
         source,
     ]
@@ -318,6 +376,7 @@ def fetch_video_info(source: str) -> dict | None:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=tool_env(),
         )
         data = json.loads(result.stdout)
     except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
@@ -353,7 +412,7 @@ def _probe_audio_codec(filepath: Path) -> str | None:
         str(filepath),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        result = subprocess.run(command, capture_output=True, text=True, check=True, env=tool_env())
         codec = result.stdout.strip()
         return codec if codec else None
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -377,11 +436,12 @@ def extract_audio(source: str, workdir: Path) -> Path:
             "download:%(progress._default_template)s",
             "-o",
             str(workdir / "source.%(ext)s"),
+            *ffmpeg_location_args(),
             *ytdlp_request_args(source),
             source,
         ]
         logging.debug("执行下载命令：%s", " ".join(command))
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, env=tool_env())
         downloaded = sorted(workdir.glob("source*.mp3"), key=lambda path: path.stat().st_mtime, reverse=True)
         if not downloaded:
             raise click.ClickException("yt-dlp 未生成 mp3 音频文件。")
@@ -401,11 +461,12 @@ def extract_audio(source: str, workdir: Path) -> Path:
         command = [ffmpeg_command(), "-y", "-i", str(input_path), "-vn", "-acodec", "libmp3lame", str(audio_path)]
         
     logging.debug("执行音频提取命令：%s", " ".join(command))
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, env=tool_env())
     return audio_path
 
 
 def split_audio_if_needed(audio_path: Path, workdir: Path, max_minutes: int = MAX_CHUNK_MINUTES) -> list[tuple[Path, int]]:
+    configure_audio_tools()
     audio = AudioSegment.from_file(audio_path)
     max_ms = max_minutes * 60 * 1000
     if len(audio) <= max_ms:

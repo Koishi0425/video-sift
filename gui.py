@@ -864,6 +864,7 @@ class VideoSiftGUI(QWidget):
         )
         self.source_preview_process = process
         self.source_preview_timeout_timer.start(5000)
+        process.setProcessEnvironment(self.tool_process_environment())
         process.start(
             ffprobe,
             [
@@ -893,8 +894,9 @@ class VideoSiftGUI(QWidget):
         self.source_preview_process = process
         self.source_preview_timeout_timer.start(20000)
         process.setWorkingDirectory(str(self.project_dir))
+        process.setProcessEnvironment(self.tool_process_environment())
         process.start(
-            sys.executable,
+            self.python_command(),
             [
                 "-m",
                 "yt_dlp",
@@ -1470,6 +1472,28 @@ class VideoSiftGUI(QWidget):
     def resolve_executable(self, command: str, setting_name: str | None = None) -> str | None:
         configured = getattr(self.app_settings, setting_name, "") if setting_name else ""
         return find_executable(command, configured)
+
+    def python_command(self) -> str:
+        executable = Path(sys.executable)
+        if executable.name.lower() == "pythonw.exe":
+            console_python = executable.with_name("python.exe")
+            if console_python.exists():
+                return str(console_python)
+        return sys.executable
+
+    def tool_process_environment(self) -> QProcessEnvironment:
+        environment = QProcessEnvironment.systemEnvironment()
+        tool_dirs = []
+        for command, setting_name in (("ffmpeg", "FFMPEG_PATH"), ("ffprobe", "FFPROBE_PATH")):
+            path = self.resolve_executable(command, setting_name)
+            if path:
+                tool_dirs.append(str(Path(path).parent))
+
+        if tool_dirs:
+            current_path = environment.value("PATH")
+            environment.insert("PATH", ";".join([*dict.fromkeys(tool_dirs), current_path]))
+
+        return environment
 
     def ytdlp_module_available(self) -> bool:
         return importlib.util.find_spec("yt_dlp") is not None
