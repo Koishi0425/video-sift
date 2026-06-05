@@ -50,6 +50,7 @@ DEFAULT_TRANSCRIBE_LANGUAGE = getattr(settings, "DEFAULT_TRANSCRIBE_LANGUAGE", "
 MAX_CHUNK_MINUTES = settings.MAX_CHUNK_MINUTES
 SUMMARY_CHUNK_CHARS = getattr(settings, "SUMMARY_CHUNK_CHARS", 12000)
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+SUBPROCESS_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])")
 DEFAULT_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -294,6 +295,12 @@ def tool_env() -> dict[str, str]:
     return env
 
 
+def run_command(command: list[str], **kwargs):
+    if SUBPROCESS_CREATION_FLAGS:
+        kwargs.setdefault("creationflags", SUBPROCESS_CREATION_FLAGS)
+    return subprocess.run(command, **kwargs)
+
+
 def configure_audio_tools() -> None:
     ffmpeg = resolve_executable("ffmpeg", "FFMPEG_PATH")
     ffprobe = resolve_executable("ffprobe", "FFPROBE_PATH")
@@ -369,7 +376,7 @@ def fetch_video_info(source: str) -> dict | None:
     ]
 
     try:
-        result = subprocess.run(
+        result = run_command(
             command,
             check=True,
             capture_output=True,
@@ -412,7 +419,7 @@ def _probe_audio_codec(filepath: Path) -> str | None:
         str(filepath),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True, env=tool_env())
+        result = run_command(command, capture_output=True, text=True, check=True, env=tool_env())
         codec = result.stdout.strip()
         return codec if codec else None
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -441,7 +448,7 @@ def extract_audio(source: str, workdir: Path) -> Path:
             source,
         ]
         logging.debug("执行下载命令：%s", " ".join(command))
-        subprocess.run(command, check=True, env=tool_env())
+        run_command(command, check=True, env=tool_env())
         downloaded = sorted(workdir.glob("source*.mp3"), key=lambda path: path.stat().st_mtime, reverse=True)
         if not downloaded:
             raise click.ClickException("yt-dlp 未生成 mp3 音频文件。")
@@ -461,7 +468,7 @@ def extract_audio(source: str, workdir: Path) -> Path:
         command = [ffmpeg_command(), "-y", "-i", str(input_path), "-vn", "-acodec", "libmp3lame", str(audio_path)]
         
     logging.debug("执行音频提取命令：%s", " ".join(command))
-    subprocess.run(command, check=True, env=tool_env())
+    run_command(command, check=True, env=tool_env())
     return audio_path
 
 

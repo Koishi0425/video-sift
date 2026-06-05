@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QEasingCurve, QEvent, QParallelAnimationGroup, QProcess, QProcessEnvironment, QPropertyAnimation, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
+    QAbstractItemView,
+    QHeaderView,
     QProgressBar,
     QLineEdit,
     QScrollArea,
@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextBrowser,
     QToolButton,
     QVBoxLayout,
@@ -38,6 +40,8 @@ from qfluentwidgets import (
     ComboBox,
     FluentIcon as FIF,
     IndeterminateProgressRing,
+    InfoBar,
+    InfoBarPosition,
     LineEdit,
     NavigationInterface,
     NavigationDisplayMode,
@@ -484,10 +488,20 @@ class VideoSiftGUI(QWidget):
         refresh_btn.setToolTip("重新扫描 outputs 目录中的任务。")
         list_header.addWidget(refresh_btn)
         left_layout.addLayout(list_header)
-        self.history_list = QListWidget(left_panel)
-        self.history_list.setMinimumWidth(220)
-        self.history_list.itemSelectionChanged.connect(self.show_selected_history)
-        left_layout.addWidget(self.history_list)
+        self.history_table = QTableWidget(left_panel)
+        self.history_table.setColumnCount(2)
+        self.history_table.setHorizontalHeaderLabels(["状态", "标题"])
+        self.history_table.setMinimumWidth(280)
+        self.history_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.history_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.history_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.history_table.setShowGrid(False)
+        self.history_table.verticalHeader().hide()
+        self.history_table.horizontalHeader().setStretchLastSection(True)
+        self.history_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.history_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.history_table.itemSelectionChanged.connect(self.show_selected_history)
+        left_layout.addWidget(self.history_table)
 
         right_panel = self.panel(expand_vertical=True)
         right_panel.setMinimumWidth(520)
@@ -896,7 +910,7 @@ class VideoSiftGUI(QWidget):
         process.setWorkingDirectory(str(self.project_dir))
         process.setProcessEnvironment(self.tool_process_environment())
         process.start(
-            self.python_command(),
+            self.silent_python_command(),
             [
                 "-m",
                 "yt_dlp",
@@ -1173,12 +1187,12 @@ class VideoSiftGUI(QWidget):
         self.start_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
-        env = QProcessEnvironment.systemEnvironment()
+        env = self.tool_process_environment()
         env.insert("PYTHONUNBUFFERED", "1")
         env.insert("PYTHONIOENCODING", "utf-8")
         self.process.setProcessEnvironment(env)
         self.process.setWorkingDirectory(str(self.project_dir))
-        self.process.start(sys.executable, args)
+        self.process.start(self.silent_python_command(), args)
 
     def cancel_task(self):
         if self.process.state() == QProcess.ProcessState.NotRunning:
@@ -1261,11 +1275,32 @@ class VideoSiftGUI(QWidget):
         if exit_code == 0:
             self.set_status("处理完成", "任务已完成，可在历史任务中查看结果。", 100)
             self.append_log("\n处理完成。\n")
+            self.notify_task_finished(True, "任务已完成", "可以在历史任务中查看总结结果。")
         else:
             message = self.last_error or f"进程异常退出，退出码 {exit_code}。"
             self.set_status("处理失败", f"{message} 点击展开详细日志可查看完整输出。", self.progress_bar.value())
             self.append_log(f"\n进程异常退出，退出码 {exit_code}。\n")
+            self.notify_task_finished(False, "任务处理失败", message)
         self.load_history()
+
+    def notify_task_finished(self, success: bool, title: str, message: str):
+        QApplication.alert(self, 8000)
+        if success:
+            InfoBar.success(
+                title=title,
+                content=message,
+                duration=5000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
+        else:
+            InfoBar.error(
+                title=title,
+                content=message,
+                duration=7000,
+                position=InfoBarPosition.TOP_RIGHT,
+                parent=self,
+            )
 
     def set_status(self, stage: str, message: str, progress: int):
         self.stage_label.setText(stage)
@@ -1285,10 +1320,10 @@ class VideoSiftGUI(QWidget):
         self.log_output.clear()
 
     def load_history(self):
-        if not hasattr(self, "history_list"):
+        if not hasattr(self, "history_table"):
             return
         current = self.selected_job_dir()
-        self.history_list.clear()
+        self.history_table.setRowCount(0)
         if not self.outputs_dir.exists():
             return
 
@@ -1298,27 +1333,51 @@ class VideoSiftGUI(QWidget):
             reverse=True,
         )
         for job_dir in jobs:
-            item = QListWidgetItem(self.history_item_title(job_dir))
-            item.setSizeHint(QSize(220, 58))
-            item.setToolTip(str(job_dir))
-            item.setData(Qt.ItemDataRole.UserRole, str(job_dir))
-            self.history_list.addItem(item)
+            row = self.history_table.rowCount()
+            self.history_table.insertRow(row)
+
+            status_item = QTableWidgetItem(self.history_status_text(job_dir))
+            title_item = QTableWidgetItem(self.history_display_title(job_dir))
+            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            status_item.setForeground(self.history_status_color(job_dir))
+            status_item.setToolTip(self.history_meta_text(job_dir))
+            title_item.setToolTip(f"{self.history_meta_text(job_dir)}\n{job_dir}")
+            title_item.setData(Qt.ItemDataRole.UserRole, str(job_dir))
+
+            self.history_table.setItem(row, 0, status_item)
+            self.history_table.setItem(row, 1, title_item)
+            self.history_table.setRowHeight(row, 46)
             if current and job_dir == current:
-                item.setSelected(True)
+                self.history_table.selectRow(row)
             elif self.current_job_dir and job_dir == self.current_job_dir:
-                item.setSelected(True)
+                self.history_table.selectRow(row)
 
-        if self.history_list.count() and not self.history_list.selectedItems():
-            self.history_list.setCurrentRow(0)
+        if self.history_table.rowCount() and not self.history_table.selectedItems():
+            self.history_table.selectRow(0)
 
-    def history_item_title(self, job_dir: Path) -> str:
+    def history_display_title(self, job_dir: Path) -> str:
         metadata = self.read_metadata(job_dir)
-        title = metadata.get("source_label") or metadata.get("video_info", {}).get("title") or job_dir.name
-        status = self.job_status(job_dir)
+        return metadata.get("video_info", {}).get("title") or metadata.get("source_label") or job_dir.name
+
+    def history_meta_text(self, job_dir: Path) -> str:
+        metadata = self.read_metadata(job_dir)
         model = metadata.get("whisper_model", "-")
         language = metadata.get("language", "-")
         updated_at = datetime.fromtimestamp(job_dir.stat().st_mtime).strftime("%m-%d %H:%M")
-        return f"{status}  {title}\nWhisper {model} · {language} · {updated_at}"
+        return f"{self.job_status(job_dir)} · Whisper {model} · {language} · {updated_at}"
+
+    def history_status_text(self, job_dir: Path) -> str:
+        return f"● {self.job_status(job_dir)}"
+
+    def history_status_color(self, job_dir: Path):
+        status = self.job_status(job_dir)
+        if status == "完成":
+            return QColor("#35d07f")
+        if status == "已转写":
+            return QColor("#49c6f5")
+        if status == "已下载":
+            return QColor("#f3bd45")
+        return QColor("#ff6b6b")
 
     def job_status(self, job_dir: Path) -> str:
         if (job_dir / "summary.md").exists():
@@ -1330,12 +1389,15 @@ class VideoSiftGUI(QWidget):
         return "未完成"
 
     def selected_job_dir(self) -> Path | None:
-        if not hasattr(self, "history_list"):
+        if not hasattr(self, "history_table"):
             return None
-        items = self.history_list.selectedItems()
-        if not items:
+        row = self.history_table.currentRow()
+        if row < 0:
             return None
-        return Path(items[0].data(Qt.ItemDataRole.UserRole))
+        item = self.history_table.item(row, 1)
+        if item is None:
+            return None
+        return Path(item.data(Qt.ItemDataRole.UserRole))
 
     def show_selected_history(self):
         job_dir = self.selected_job_dir()
@@ -1343,7 +1405,7 @@ class VideoSiftGUI(QWidget):
             return
 
         metadata = self.read_metadata(job_dir)
-        title = metadata.get("source_label") or metadata.get("video_info", {}).get("title") or job_dir.name
+        title = self.history_display_title(job_dir)
         model = metadata.get("whisper_model", "-")
         language = metadata.get("language", "-")
         self.history_title.setText(title)
@@ -1481,6 +1543,14 @@ class VideoSiftGUI(QWidget):
                 return str(console_python)
         return sys.executable
 
+    def silent_python_command(self) -> str:
+        executable = Path(sys.executable)
+        if executable.name.lower() == "python.exe":
+            windowless_python = executable.with_name("pythonw.exe")
+            if windowless_python.exists():
+                return str(windowless_python)
+        return sys.executable
+
     def tool_process_environment(self) -> QProcessEnvironment:
         environment = QProcessEnvironment.systemEnvironment()
         tool_dirs = []
@@ -1616,10 +1686,23 @@ class VideoSiftGUI(QWidget):
                 background: #27dbe1;
                 border-radius: 4px;
             }
-            QTextBrowser#markdownView, QListWidget, QTabWidget::pane {
+            QTextBrowser#markdownView, QTableWidget, QTabWidget::pane {
                 background: #20242a;
                 border: 1px solid #3a3f48;
                 border-radius: 6px;
+            }
+            QTableWidget {
+                gridline-color: transparent;
+                selection-background-color: #303641;
+                selection-color: #ffffff;
+            }
+            QHeaderView::section {
+                background: #25282e;
+                color: #cbd1da;
+                border: none;
+                border-bottom: 1px solid #3a3f48;
+                padding: 7px 8px;
+                font-weight: 600;
             }
             QTabWidget::pane {
                 top: -1px;
@@ -1642,16 +1725,12 @@ class VideoSiftGUI(QWidget):
             QTabBar::tab:hover {
                 background: #30343c;
             }
-            QListWidget::item {
-                padding: 9px 10px;
+            QTableWidget::item {
+                padding: 6px 8px;
                 border-bottom: 1px solid #33363c;
             }
-            QListWidget::item:hover {
-                background: #2b3038;
-            }
-            QListWidget::item:selected {
+            QTableWidget::item:selected {
                 background: #303641;
-                border-left: 3px solid #27dbe1;
             }
             QSplitter::handle {
                 background: #181b20;
@@ -1660,20 +1739,34 @@ class VideoSiftGUI(QWidget):
                 background: #27dbe1;
             }
             QScrollBar:vertical, QScrollBar:horizontal {
-                background: #1e2126;
+                background: transparent;
                 border: none;
                 margin: 0;
             }
+            QScrollBar:vertical {
+                width: 10px;
+            }
+            QScrollBar:horizontal {
+                height: 10px;
+            }
             QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
-                background: #4a505c;
-                border-radius: 4px;
-                min-height: 24px;
-                min-width: 24px;
+                background: #3d444e;
+                border: 2px solid transparent;
+                border-radius: 5px;
+                background-clip: padding;
+                min-height: 30px;
+                min-width: 30px;
             }
             QScrollBar::handle:vertical:hover, QScrollBar::handle:horizontal:hover {
-                background: #606978;
+                background: #5a6573;
             }
-            QScrollBar::add-line, QScrollBar::sub-line {
+            QScrollBar::handle:vertical:pressed, QScrollBar::handle:horizontal:pressed {
+                background: #6b7686;
+            }
+            QScrollBar::add-line, QScrollBar::sub-line,
+            QScrollBar::add-page, QScrollBar::sub-page {
+                background: transparent;
+                border: none;
                 width: 0;
                 height: 0;
             }
