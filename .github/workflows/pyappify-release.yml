@@ -19,8 +19,6 @@ jobs:
   build:
     name: Build Windows package
     runs-on: windows-latest
-    env:
-      PIP_CACHE_DIR: ${{ runner.temp }}\pip-cache
 
     steps:
       - name: Checkout repository
@@ -72,7 +70,7 @@ jobs:
       - name: Restore pip cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.PIP_CACHE_DIR }}
+          path: ~\AppData\Local\pip\Cache
           key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt', 'pyproject.toml') }}
           restore-keys: |
             pip-${{ runner.os }}-
