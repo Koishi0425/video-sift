@@ -98,7 +98,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: pyappify_dist/*
-          body: |
-            Video Sift PyAppify release.
-
-            This package is built with PyAppify and includes the launcher plus prebuilt runtime data for offline-friendly distribution.
+          body_path: .github/release-notes-v1.2.1.md

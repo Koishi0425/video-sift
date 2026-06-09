@@ -61,7 +61,7 @@ ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 DOWNLOAD_PERCENT = re.compile(r"(\d+(?:\.\d+)?)%")
 TASK_DIR_LINE = re.compile(r"任务目录[:：]\s*(.+)")
 BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])")
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.2.1"
 APP_DIR = Path(__file__).resolve().parent
 APP_ICON_PATH = APP_DIR / "assets" / "app_icon.png"
 
@@ -437,6 +437,7 @@ class VideoSiftGUI(QWidget):
         self.stage_label = SubtitleLabel("等待开始", status_panel)
         self.status_label = BodyLabel("准备好后点击开始处理。", status_panel)
         self.status_label.setObjectName("mutedLabel")
+        self.status_label.setWordWrap(True)
         self.progress_bar = QProgressBar(status_panel)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -1283,6 +1284,30 @@ class VideoSiftGUI(QWidget):
                 return line
         return "任务失败，可展开日志查看详情。"
 
+    def actionable_error_hint(self, text: str) -> str:
+        plain = text.lower()
+        if "http error 412" in plain or "precondition failed" in plain:
+            return "建议在设置页填写 B 站 cookies 文件，或设置 cookies-from-browser；如果刚更新过浏览器登录状态，请重新保存设置后再试。"
+        if ("deepseek" in plain and "api key" in plain) or "deepseek_api_key" in plain:
+            return "请打开设置页填写 DeepSeek API Key，保存后重新运行；发布版不会内置任何 API Key。"
+        if "ffmpeg" in plain:
+            return "请安装 ffmpeg，或在设置页填写 ffmpeg.exe 和 ffprobe.exe 的完整路径后重新运行。"
+        if "no module named yt_dlp" in plain or "未找到 yt-dlp" in text:
+            return "当前运行环境缺少 yt-dlp 模块。请重新安装依赖，或重新下载完整发布包。"
+        if "unable to download webpage" in plain or "timed out" in plain or "connection" in plain:
+            return "请检查网络连接；如果目标站点需要代理，在设置页填写 yt-dlp 代理后重试。"
+        if "找不到输入文件" in text or "no such file or directory" in plain:
+            return "请确认本地文件路径仍然存在，路径中没有被移动、删除或权限受限。"
+        if "transcript.txt" in plain and "--summary-only" in plain:
+            return "仅重新总结需要已有转写文本。请先运行完整处理或仅语音转文字，再重新总结。"
+        if "deepseek 返回了空总结" in text or "api" in plain and ("401" in plain or "403" in plain):
+            return "请检查 DeepSeek API Key、Base URL 和模型名是否正确，确认账号余额或权限可用。"
+        return "请展开详细日志查看完整输出；如果是下载阶段失败，优先检查网络、cookies 和代理设置。"
+
+    def failure_message(self, message: str) -> str:
+        hint = self.actionable_error_hint(self.log_text + "\n" + message)
+        return f"{message} {hint}"
+
     def process_finished(self, exit_code, exit_status):
         self.start_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
@@ -1292,9 +1317,10 @@ class VideoSiftGUI(QWidget):
             self.notify_task_finished(True, "任务已完成", "可以在历史任务中查看总结结果。")
         else:
             message = self.last_error or f"进程异常退出，退出码 {exit_code}。"
-            self.set_status("处理失败", f"{message} 点击展开详细日志可查看完整输出。", self.progress_bar.value())
-            self.append_log(f"\n进程异常退出，退出码 {exit_code}。\n")
-            self.notify_task_finished(False, "任务处理失败", message)
+            detail = self.failure_message(message)
+            self.set_status("处理失败", detail, self.progress_bar.value())
+            self.append_log(f"\n进程异常退出，退出码 {exit_code}。\n建议：{self.actionable_error_hint(self.log_text + message)}\n")
+            self.notify_task_finished(False, "任务处理失败", detail)
         self.load_history()
 
     def notify_task_finished(self, success: bool, title: str, message: str):
