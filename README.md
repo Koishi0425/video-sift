@@ -145,9 +145,11 @@ bilibili_BV1xxxxxxxxxx_视频标题_ab12cd34ef
 当前发行配置：
 
 - 应用名：`video-sift`
+- 当前版本：`v1.2.0`
 - 入口脚本：`gui.py`
 - Python 版本：`3.12`
 - 依赖文件：`requirements.txt`
+- 图标资源：`icon.png`、`assets/app_icon.ico`
 - 代码仓库：`https://github.com/Koishi0425/video-sift.git`
 - GitHub Actions：`.github/workflows/pyappify-release.yml`
 
@@ -229,7 +231,8 @@ git push origin v0.1.0
 - [x] 增加设置页面，管理 DeepSeek API、代理、cookies、默认模型、默认语言。
 - [x] 增加依赖检查，提示 ffmpeg、yt-dlp、Whisper 模型缓存等状态。
 - [x] 为 PyAppify 准备稳定 GUI 入口和发行配置。
-- [ ] 增加应用图标、版本号、发行说明和更新说明。
+- [x] 增加应用图标和版本号。
+- [ ] 增加发行说明和更新说明。
 - [x] 规划模型缓存、输出目录、配置文件在发行版中的默认位置。
 
 ## License

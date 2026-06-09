@@ -9,7 +9,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QEasingCurve, QEvent, QParallelAnimationGroup, QProcess, QProcessEnvironment, QPropertyAnimation, QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -61,6 +61,9 @@ ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 DOWNLOAD_PERCENT = re.compile(r"(\d+(?:\.\d+)?)%")
 TASK_DIR_LINE = re.compile(r"任务目录[:：]\s*(.+)")
 BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])")
+APP_VERSION = "1.2.0"
+APP_DIR = Path(__file__).resolve().parent
+APP_ICON_PATH = APP_DIR / "assets" / "app_icon.png"
 
 
 class DropLineEdit(LineEdit):
@@ -147,10 +150,19 @@ class WindowTitleBar(QFrame):
         layout.setContentsMargins(14, 0, 8, 0)
         layout.setSpacing(8)
 
-        mark = QLabel("VS", self)
+        mark = QLabel(self)
         mark.setObjectName("titleMark")
         mark.setFixedSize(24, 24)
         mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if APP_ICON_PATH.exists():
+            mark.setPixmap(QPixmap(str(APP_ICON_PATH)).scaled(
+                22,
+                22,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        else:
+            mark.setText("VS")
         layout.addWidget(mark)
 
         title = QLabel("Video Sift", self)
@@ -235,7 +247,9 @@ class VideoSiftGUI(QWidget):
         self.source_preview_timeout_timer.setSingleShot(True)
         self.source_preview_timeout_timer.timeout.connect(self.source_preview_timed_out)
 
-        self.setWindowTitle("Video Sift")
+        self.setWindowTitle(f"Video Sift v{APP_VERSION}")
+        if APP_ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(APP_ICON_PATH)))
         self.setObjectName("appRoot")
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.resize(1120, 760)
@@ -659,7 +673,7 @@ class VideoSiftGUI(QWidget):
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(18, 18, 18, 18)
         panel_layout.setSpacing(10)
-        panel_layout.addWidget(SubtitleLabel("Video Sift", panel))
+        panel_layout.addWidget(SubtitleLabel(f"Video Sift v{APP_VERSION}", panel))
         
         # GitHub Repo Link
         github_link = BodyLabel('<a href="https://github.com/Koishi0425/video-sift">Koishi0425/video-sift: used to summarize video content that is full of empty talk.</a>', panel)
@@ -1776,8 +1790,6 @@ class VideoSiftGUI(QWidget):
 
 def main():
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
-    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
 
     app = QApplication(sys.argv)
     setTheme(Theme.DARK)
