@@ -71,7 +71,7 @@ copy settings.example.py settings.py
 
 ## 打包发行
 
-当前版本：`v1.2.1`
+当前版本：`v1.2.2`
 
 项目已提供 PyAppify 配置：
 
@@ -83,8 +83,8 @@ copy settings.example.py settings.py
 发布方式：
 
 ```powershell
-git tag v1.2.1
-git push origin v1.2.1
+git tag v1.2.2
+git push origin v1.2.2
 ```
 
 推送 `v*` 标签后，GitHub Actions 会构建 Windows 发行包并上传到对应 GitHub Release。
@@ -92,7 +92,7 @@ git push origin v1.2.1
 发布前请更新：
 
 - `CHANGELOG.md`
-- `.github/release-notes-v1.2.1.md`
+- `.github/release-notes-v1.2.2.md`
 
 ## 常见问题
 

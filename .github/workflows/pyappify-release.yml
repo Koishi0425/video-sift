@@ -98,4 +98,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: pyappify_dist/*
-          body_path: .github/release-notes-v1.2.1.md
+          body_path: .github/release-notes-v1.2.2.md
