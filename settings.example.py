@@ -7,7 +7,7 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # 模型设置
 DEFAULT_LLM_MODEL = "deepseek-chat" # 根据需要调整
 DEFAULT_DETECT_WHISPER_MODEL = "tiny"
-DEFAULT_WHISPER_MODEL = "medium"
+DEFAULT_WHISPER_MODEL = "base"
 DEFAULT_TRANSCRIBE_LANGUAGE = "auto"
 
 # 路径与分块设置

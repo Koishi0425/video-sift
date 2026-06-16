@@ -64,6 +64,13 @@ BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])
 APP_VERSION = "1.2.1"
 APP_DIR = Path(__file__).resolve().parent
 APP_ICON_PATH = APP_DIR / "assets" / "app_icon.png"
+SUMMARY_MODE_OPTIONS = {
+    "通用总结": "general",
+    "课程笔记": "course",
+    "会议纪要": "meeting",
+    "测评结论": "review",
+    "观点分析": "argument",
+}
 
 
 class DropLineEdit(LineEdit):
@@ -403,6 +410,16 @@ class VideoSiftGUI(QWidget):
             "仅语音转文字: 生成转写文本后停止\n"
             "仅重新总结: 使用已有 transcript.txt 重新生成 summary.md"
         )
+        self.summary_mode_cb = ComboBox(options_panel)
+        self.summary_mode_cb.addItems(list(SUMMARY_MODE_OPTIONS))
+        self.summary_mode_cb.setToolTip(
+            "选择总结输出结构。\n"
+            "通用总结: 适合大多数视频\n"
+            "课程笔记: 概念、步骤、例子和学习路径\n"
+            "会议纪要: 议题、结论、待办和责任人线索\n"
+            "测评结论: 评价维度、优缺点和适合人群\n"
+            "观点分析: 立场、论据、漏洞和反方视角"
+        )
         self.chk_force = CheckBox("强制重新处理", options_panel)
         self.chk_force.setToolTip("忽略已有音频、转写和总结缓存，重新执行所选流程。")
 
@@ -410,6 +427,7 @@ class VideoSiftGUI(QWidget):
         self.add_field(options_layout, "转写语言", self.lang_cb, 1, 0)
         self.add_field(options_layout, "Whisper 模型", self.model_cb, 1, 1)
         self.add_field(options_layout, "处理模式", self.mode_cb, 1, 2)
+        self.add_field(options_layout, "总结模式", self.summary_mode_cb, 1, 3)
         options_layout.addWidget(self.chk_force, 2, 0, 1, 2)
         layout.addWidget(options_panel)
 
@@ -1182,7 +1200,17 @@ class VideoSiftGUI(QWidget):
         if self.process.state() != QProcess.ProcessState.NotRunning:
             return
 
-        args = ["main.py", source, "--language", self.lang_cb.currentText(), "--whisper-model", self.model_cb.currentText()]
+        summary_mode = SUMMARY_MODE_OPTIONS.get(self.summary_mode_cb.currentText(), "general")
+        args = [
+            "main.py",
+            source,
+            "--language",
+            self.lang_cb.currentText(),
+            "--whisper-model",
+            self.model_cb.currentText(),
+            "--summary-mode",
+            summary_mode,
+        ]
         mode = self.mode_cb.currentText()
         if mode == "仅下载音频":
             args.append("--download-only")

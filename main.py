@@ -37,12 +37,79 @@ bootstrap_tool_path()
 from pydub import AudioSegment
 
 
-SYSTEM_PROMPT = """你是一个逻辑严密的知识提炼专家。用户会给你一份从视频中提取的语音识别文本。这个视频的 up主讲解可能缺乏条理、内容跳脱、有很多口水话。你的任务是：
+SYSTEM_PROMPT = """你是一个逻辑严密的知识提炼专家。用户会给你一份从视频中提取的语音识别文本。这个视频的讲解可能缺乏条理、内容跳脱、有很多口水话。你的任务是：
 忽略原本杂乱的叙述顺序，提取出核心观点。
-剔除废话、重复内容和不相关的情感宣泄。
+剔除废话、重复内容和不相关的情绪表达。
 让读者能以最高的效率获取视频的有效信息。
-不仅仅要整理视频内容，还要在结尾总结出视频的核心论点和结论，帮助读者快速理解视频的价值。
-直接输出结构化的 Markdown 格式输出（包括：核心主题、背景/问题、核心论点分解、结论）。"""
+直接输出结构化的 Markdown，不要逐字复述转写稿。"""
+
+SUMMARY_MODES = {
+    "general": {
+        "label": "通用总结",
+        "description": "适合大多数视频，强调核心主题、背景、主要观点和结论。",
+        "partial": "提炼本块的核心主题、关键事实、主要观点、重要例子和可忽略内容。",
+        "final": """请按以下结构输出：
+# 核心主题
+## 背景/问题
+## 核心论点
+## 重要信息
+## 结论
+## 值得继续看的部分""",
+    },
+    "course": {
+        "label": "课程笔记",
+        "description": "适合课程、教程、讲座，强调概念、步骤、例子和学习路径。",
+        "partial": "提炼本块讲到的概念、步骤、例子、易错点和前后依赖关系。",
+        "final": """请按以下结构输出：
+# 课程主题
+## 学习目标
+## 核心概念
+## 步骤/流程
+## 例子与应用
+## 易错点
+## 学习路径建议""",
+    },
+    "meeting": {
+        "label": "会议纪要",
+        "description": "适合会议、访谈、讨论，强调议题、结论、待办和责任人线索。",
+        "partial": "提炼本块的讨论议题、明确结论、分歧点、待办事项和责任人线索。",
+        "final": """请按以下结构输出：
+# 会议主题
+## 议题概览
+## 已达成结论
+## 待办事项
+## 责任人/相关方线索
+## 风险与分歧
+## 后续跟进建议""",
+    },
+    "review": {
+        "label": "测评结论",
+        "description": "适合产品、游戏、服务、内容测评，强调评价维度、优缺点和适合人群。",
+        "partial": "提炼本块涉及的评价对象、评价维度、优点、缺点、证据和适合/不适合人群。",
+        "final": """请按以下结构输出：
+# 测评对象
+## 总体结论
+## 评价维度
+## 优点
+## 缺点
+## 适合人群
+## 不适合人群
+## 购买/观看/使用建议""",
+    },
+    "argument": {
+        "label": "观点分析",
+        "description": "适合观点输出、评论、争议内容，强调立场、论据、漏洞和反方视角。",
+        "partial": "提炼本块的核心立场、论据、例子、隐含假设、可能漏洞和反方视角。",
+        "final": """请按以下结构输出：
+# 核心立场
+## 主要论据
+## 关键例子
+## 隐含假设
+## 论证漏洞
+## 反方视角
+## 综合判断""",
+    },
+}
 
 DEFAULT_MODEL = settings.DEFAULT_LLM_MODEL
 DEFAULT_WORKDIR = settings.DEFAULT_WORKDIR
@@ -52,6 +119,10 @@ SUMMARY_CHUNK_CHARS = getattr(settings, "SUMMARY_CHUNK_CHARS", 12000)
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 SUBPROCESS_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])")
+MAX_CONTEXT_TERMS = 30
+MAX_CONTEXT_DESCRIPTION_CHARS = 500
+MAX_WHISPER_INITIAL_PROMPT_CHARS = 800
+MAX_SUMMARY_CONTEXT_CHARS = 1200
 DEFAULT_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -393,12 +464,108 @@ def fetch_video_info(source: str) -> dict | None:
         "id": data.get("id"),
         "title": data.get("title"),
         "uploader": data.get("uploader"),
+        "channel": data.get("channel"),
+        "categories": data.get("categories"),
+        "tags": data.get("tags"),
+        "description": compact_text(str(data.get("description")), MAX_CONTEXT_DESCRIPTION_CHARS) if data.get("description") else None,
+        "playlist": data.get("playlist"),
+        "series": data.get("series"),
         "duration": data.get("duration"),
         "view_count": data.get("view_count"),
         "webpage_url": data.get("webpage_url"),
         "extractor": data.get("extractor_key") or data.get("extractor"),
     }
     return {key: value for key, value in info.items() if value}
+
+
+def compact_text(value: str, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", value).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "..."
+
+
+def context_term_candidates(source: str, video_info: dict | None = None) -> list[str]:
+    terms: list[str] = []
+
+    def add(value) -> None:
+        if value is None:
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add(item)
+            return
+        text = compact_text(str(value), 80)
+        if text and text not in terms:
+            terms.append(text)
+
+    if video_info:
+        add(video_info.get("title"))
+        add(video_info.get("uploader"))
+        add(video_info.get("channel"))
+        add(video_info.get("playlist"))
+        add(video_info.get("series"))
+        add(video_info.get("categories"))
+        add(video_info.get("tags"))
+    elif not is_url(source):
+        add(Path(source).expanduser().stem)
+
+    return terms[:MAX_CONTEXT_TERMS]
+
+
+def source_context(source: str, video_info: dict | None = None) -> dict:
+    context = {
+        "title": "",
+        "uploader": "",
+        "terms": context_term_candidates(source, video_info),
+        "description": "",
+    }
+    if video_info:
+        context["title"] = str(video_info.get("title") or "")
+        context["uploader"] = str(video_info.get("uploader") or video_info.get("channel") or "")
+        description = video_info.get("description")
+        if description:
+            context["description"] = compact_text(str(description), MAX_CONTEXT_DESCRIPTION_CHARS)
+    elif not is_url(source):
+        context["title"] = Path(source).expanduser().stem
+    return {key: value for key, value in context.items() if value}
+
+
+def whisper_initial_prompt(context: dict) -> str | None:
+    parts = []
+    title = context.get("title")
+    if title:
+        parts.append(f"标题：{title}")
+    uploader = context.get("uploader")
+    if uploader:
+        parts.append(f"作者或频道：{uploader}")
+    terms = context.get("terms") or []
+    if terms:
+        parts.append("可能出现的专有名词：" + "、".join(terms))
+    if not parts:
+        return None
+    prompt = "。".join(parts) + "。请尽量按以上写法转写专有名词，并保留自然标点。"
+    return compact_text(prompt, MAX_WHISPER_INITIAL_PROMPT_CHARS)
+
+
+def summary_context_text(context: dict, include_description: bool = True) -> str:
+    lines = []
+    title = context.get("title")
+    if title:
+        lines.append(f"- 标题：{title}")
+    uploader = context.get("uploader")
+    if uploader:
+        lines.append(f"- 作者/频道：{uploader}")
+    terms = context.get("terms") or []
+    if terms:
+        lines.append("- 可能出现的专有名词：" + "、".join(terms))
+    description = context.get("description")
+    if include_description and description:
+        lines.append(f"- 简介摘录：{description}")
+    text = "\n".join(lines).strip()
+    if len(text) <= MAX_SUMMARY_CONTEXT_CHARS:
+        return text
+    return text[:MAX_SUMMARY_CONTEXT_CHARS].rstrip() + "..."
 
 
 def format_timestamp(seconds: float) -> str:
@@ -515,8 +682,18 @@ def save_timestamp_files(workdir: Path, segments: list[dict]) -> None:
     (workdir / "transcript_with_timestamps.md").write_text("\n\n".join(lines), encoding="utf-8")
 
 
-def transcribe_audio(audio_path: Path, workdir: Path, detect_model_name: str, whisper_model: str, language: str) -> tuple[str, str | None]:
+def transcribe_audio(
+    audio_path: Path,
+    workdir: Path,
+    detect_model_name: str,
+    whisper_model: str,
+    language: str,
+    context: dict | None = None,
+) -> tuple[str, str | None]:
     chunks = split_audio_if_needed(audio_path, workdir)
+    initial_prompt = whisper_initial_prompt(context or {})
+    if initial_prompt:
+        logging.info("已为 Whisper 提供标题/标签上下文提示，帮助识别专有名词")
 
     if language == "auto":
         logging.info("加载语言检测模型：%s", detect_model_name)
@@ -538,7 +715,12 @@ def transcribe_audio(audio_path: Path, workdir: Path, detect_model_name: str, wh
     for index, (chunk_path, start_ms) in enumerate(chunks, start=1):
         started_at = time.perf_counter()
         logging.info("正在转写第 %d/%d 段音频：%s", index, len(chunks), chunk_path)
-        result = model.transcribe(str(chunk_path), language=transcribe_language, fp16=False)
+        result = model.transcribe(
+            str(chunk_path),
+            language=transcribe_language,
+            fp16=False,
+            initial_prompt=initial_prompt,
+        )
         transcripts.append(result["text"].strip())
 
         offset_seconds = start_ms / 1000
@@ -609,14 +791,102 @@ def split_text(text: str, max_chars: int) -> list[str]:
     return chunks or [text]
 
 
-def summarize_transcript(transcript: str, model: str, workdir: Path, force_summary: bool) -> str:
+def summary_mode_config(summary_mode: str) -> dict:
+    return SUMMARY_MODES.get(summary_mode, SUMMARY_MODES["general"])
+
+
+def summary_mode_label(summary_mode: str) -> str:
+    return summary_mode_config(summary_mode)["label"]
+
+
+def prompt_context_section(context: dict | None, include_description: bool = True) -> str:
+    if not context:
+        return ""
+    text = summary_context_text(context, include_description)
+    if not text:
+        return ""
+    return f"""可参考的来源上下文如下。它用于纠正专有名词和理解主题；如果和转写内容冲突，不要凭空扩写。
+
+{text}
+
+"""
+
+
+def final_summary_prompt(transcript: str, summary_mode: str, context: dict | None = None) -> str:
+    config = summary_mode_config(summary_mode)
+    return f"""请按“{config["label"]}”模式重构并总结以下视频转写文本。
+
+模式说明：{config["description"]}
+
+输出要求：
+- 使用 Markdown。
+- 不要逐字复述转写稿。
+- 优先提炼有效信息，忽略口癖、重复和跑题内容。
+- 保持结构稳定，不要临时发明新的一级栏目。
+
+{config["final"]}
+
+{prompt_context_section(context)}转写文本：
+
+{transcript}"""
+
+
+def partial_summary_prompt(chunk: str, index: int, total: int, summary_mode: str, context: dict | None = None) -> str:
+    config = summary_mode_config(summary_mode)
+    return f"""下面是同一个视频转写文本的第 {index}/{total} 部分。
+
+请先做分块提炼，不要输出最终总总结。
+
+本块提炼要求：
+- {config["partial"]}
+- 保留重要事实、论点、例子和数字。
+- 标出与前后文可能相关的信息。
+- 去掉口癖、重复和明显跑题内容。
+
+{prompt_context_section(context, include_description=False)}转写文本：
+
+{chunk}"""
+
+
+def merge_summary_prompt(partial_summaries: list[str], summary_mode: str, context: dict | None = None) -> str:
+    config = summary_mode_config(summary_mode)
+    merged = "\n\n".join(f"## 分块摘要 {index}\n\n{summary}" for index, summary in enumerate(partial_summaries, start=1))
+    return f"""下面是同一个视频的多个分块摘要。请按“{config["label"]}”模式合并为最终总结。
+
+模式说明：{config["description"]}
+
+合并要求：
+- 使用 Markdown。
+- 去重，避免反复列出同一个观点。
+- 保留跨块反复出现的核心观点。
+- 修正分块摘要之间的前后顺序和逻辑关系。
+- 不要逐字复述分块摘要。
+- 保持结构稳定，不要临时发明新的一级栏目。
+
+{config["final"]}
+
+{prompt_context_section(context)}分块摘要：
+
+{merged}"""
+
+
+def summarize_transcript(
+    transcript: str,
+    model: str,
+    workdir: Path,
+    force_summary: bool,
+    summary_mode: str,
+    context: dict | None = None,
+) -> str:
     chunks = split_text(transcript, SUMMARY_CHUNK_CHARS)
     partial_dir = workdir / "partial_summaries"
+    if summary_mode != "general":
+        partial_dir = partial_dir / summary_mode
     partial_dir.mkdir(parents=True, exist_ok=True)
 
     if len(chunks) == 1:
         logging.info("转写文本未超过分块阈值，直接总结")
-        return call_deepseek(f"请重构并总结以下视频转写文本：\n\n{transcript}", model)
+        return call_deepseek(final_summary_prompt(transcript, summary_mode, context), model)
 
     logging.info("转写文本较长，将分为 %d 块分别总结后再合并", len(chunks))
     partial_summaries = []
@@ -630,15 +900,14 @@ def summarize_transcript(transcript: str, model: str, workdir: Path, force_summa
         started_at = time.perf_counter()
         logging.info("正在总结文本块 %d/%d", index, len(chunks))
         partial_summary = call_deepseek(
-            f"下面是同一个视频转写文本的第 {index}/{len(chunks)} 部分。请先提炼这一部分的核心信息，保留重要事实、论点和例子，不要输出最终总总结：\n\n{chunk}",
+            partial_summary_prompt(chunk, index, len(chunks), summary_mode, context),
             model,
         )
         partial_path.write_text(partial_summary, encoding="utf-8")
         partial_summaries.append(partial_summary)
         log_stage(f"文本块 {index}/{len(chunks)} 总结", started_at)
 
-    merged = "\n\n".join(f"## 分块摘要 {index}\n\n{summary}" for index, summary in enumerate(partial_summaries, start=1))
-    return call_deepseek(f"下面是同一个视频的多个分块摘要。请去重、合并并输出最终结构化 Markdown 总结：\n\n{merged}", model)
+    return call_deepseek(merge_summary_prompt(partial_summaries, summary_mode, context), model)
 
 
 def validate_stage_options(download_only: bool, transcript_only: bool, summary_only: bool) -> None:
@@ -653,6 +922,7 @@ def validate_stage_options(download_only: bool, transcript_only: bool, summary_o
 @click.option("--detect-model", default=settings.DEFAULT_DETECT_WHISPER_MODEL, show_default=True, help="用于自动检测语言的较小 Whisper 模型名称，例如 tiny/base。")
 @click.option("--whisper-model", default=settings.DEFAULT_WHISPER_MODEL, show_default=True, help="本地 Whisper 模型名称，例如 tiny/base/small/medium/large。")
 @click.option("--llm-model", default=DEFAULT_MODEL, show_default=True, help="DeepSeek 总结模型。")
+@click.option("--summary-mode", default="general", type=click.Choice(list(SUMMARY_MODES)), show_default=True, help="总结模式：general/course/meeting/review/argument。")
 @click.option("--language", default=DEFAULT_TRANSCRIBE_LANGUAGE, show_default=True, help="转写语言代码，例如 auto/zh/ja/en。auto 会先检测首段音频语言，再固定该语言转写。")
 @click.option("--force", is_flag=True, help="忽略已有音频和转写文本，强制重新处理。")
 @click.option("--force-summary", is_flag=True, help="忽略已有 summary.md 和分块摘要，强制重新总结。")
@@ -666,6 +936,7 @@ def main(
     detect_model: str,
     whisper_model: str,
     llm_model: str,
+    summary_mode: str,
     language: str,
     force: bool,
     force_summary: bool,
@@ -686,10 +957,18 @@ def main(
     video_info = fetch_video_info(source)
     job_dir = resolve_job_dir(source, workdir, video_info)
     prepare_workdir(job_dir)
+    if not video_info:
+        existing_metadata = load_metadata(job_dir)
+        if existing_metadata and isinstance(existing_metadata.get("video_info"), dict):
+            video_info = existing_metadata["video_info"]
+    context = source_context(source, video_info)
     setup_logging(job_dir, log_level)
     logging.info("任务目录：%s", job_dir)
     logging.info("输入源：%s", source)
     logging.info("Whisper 模型：%s，转写语言：%s，LLM 模型：%s", whisper_model, language, llm_model)
+    logging.info("总结模式：%s", summary_mode_label(summary_mode))
+    if context.get("terms"):
+        logging.info("上下文提示词：%s", "、".join(context["terms"][:8]))
 
     if video_info and video_info.get("title"):
         logging.info("视频标题：%s", video_info["title"])
@@ -734,7 +1013,7 @@ def main(
         else:
             started_at = time.perf_counter()
             logging.info("正在进行语音转文字...")
-            transcript, detected_language = transcribe_audio(audio_path, job_dir, detect_model, whisper_model, language)
+            transcript, detected_language = transcribe_audio(audio_path, job_dir, detect_model, whisper_model, language, context)
             write_metadata(job_dir, source, whisper_model, audio_path, language, detected_language, video_info)
             log_stage("语音转文字", started_at)
 
@@ -753,7 +1032,7 @@ def main(
         )
         return
 
-    if not force_summary and not force and metadata_matches(job_dir, source, whisper_model, language) and is_nonempty_file(cached_summary_path):
+    if not summary_only and not force_summary and not force and metadata_matches(job_dir, source, whisper_model, language) and is_nonempty_file(cached_summary_path):
         logging.info("复用已存在的总结：%s", cached_summary_path)
         announce_outputs(
             "总结已完成（复用已有结果）",
@@ -767,7 +1046,7 @@ def main(
 
     logging.info("正在调用 DeepSeek 进行逻辑重构...")
     started_at = time.perf_counter()
-    summary = summarize_transcript(transcript, llm_model, job_dir, force_summary or force)
+    summary = summarize_transcript(transcript, llm_model, job_dir, force_summary or force or summary_only, summary_mode, context)
     cached_summary_path.write_text(summary, encoding="utf-8")
     log_stage("DeepSeek 总结", started_at)
 
