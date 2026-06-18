@@ -8,6 +8,7 @@ Video Sift 是一个音视频内容提取与总结工具：先用 `yt-dlp` / `ff
 
 - 支持本地音频/视频文件、在线视频链接、Bilibili BV 号。
 - 支持自动识别转写语言，也可以手动指定语言。
+- Bilibili 视频会优先尝试使用可获取的站点字幕，失败后自动回退 Whisper。
 - 长音频会自动切分，长文本会分块总结后再合并。
 - 会复用已有音频、转写和总结，避免重复处理。
 - GUI 支持任务进度、折叠日志、历史任务、总结阅读、设置管理。
@@ -66,33 +67,9 @@ copy settings.example.py settings.py
 - `audio.mp3`：提取出的音频。
 - `transcript.txt`：Whisper 转写文本。
 - `transcript_with_timestamps.md`：带时间戳的转写文本。
+- `site_subtitles/`：命中站点字幕时保存的原始字幕文件。
 - `summary.md`：DeepSeek 生成的结构化总结。
 - `run.log`：本次运行日志。
-
-## 打包发行
-
-当前版本：`v1.2.2`
-
-项目已提供 PyAppify 配置：
-
-- `pyappify.yml`
-- `.github/workflows/pyappify-release.yml`
-- `icon.png`
-- `assets/app_icon.ico`
-
-发布方式：
-
-```powershell
-git tag v1.2.2
-git push origin v1.2.2
-```
-
-推送 `v*` 标签后，GitHub Actions 会构建 Windows 发行包并上传到对应 GitHub Release。
-
-发布前请更新：
-
-- `CHANGELOG.md`
-- `.github/release-notes-v1.2.2.md`
 
 ## 常见问题
 

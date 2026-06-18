@@ -61,9 +61,12 @@ ANSI_ESCAPE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 DOWNLOAD_PERCENT = re.compile(r"(\d+(?:\.\d+)?)%")
 TASK_DIR_LINE = re.compile(r"任务目录[:：]\s*(.+)")
 BILIBILI_BVID_PATTERN = re.compile(r"(?i)(?<![0-9a-z])BV[0-9a-z]{10}(?![0-9a-z])")
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 APP_DIR = Path(__file__).resolve().parent
 APP_ICON_PATH = APP_DIR / "assets" / "app_icon.png"
+CREATE_NO_WINDOW = 0x08000000
+STARTF_USESHOWWINDOW = 0x00000001
+SW_HIDE = 0
 SUMMARY_MODE_OPTIONS = {
     "通用总结": "general",
     "课程笔记": "course",
@@ -707,9 +710,31 @@ class VideoSiftGUI(QWidget):
 
     def setup_process(self):
         self.process = QProcess(self)
+        self.configure_hidden_process(self.process)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self.handle_stdout)
         self.process.finished.connect(self.process_finished)
+
+    def configure_hidden_process(self, process: QProcess):
+        if sys.platform != "win32" or not hasattr(process, "setCreateProcessArgumentsModifier"):
+            return
+
+        def modifier(args):
+            try:
+                args.flags |= CREATE_NO_WINDOW
+            except AttributeError:
+                pass
+            try:
+                args.startupInfo.dwFlags |= STARTF_USESHOWWINDOW
+                args.startupInfo.wShowWindow = SW_HIDE
+            except AttributeError:
+                pass
+
+        try:
+            process.setCreateProcessArgumentsModifier(modifier)
+            process._video_sift_process_modifier = modifier
+        except (AttributeError, TypeError):
+            return
 
     def scroll_page(self) -> tuple[QWidget, QVBoxLayout]:
         wrapper = QWidget(self)
@@ -904,6 +929,7 @@ class VideoSiftGUI(QWidget):
 
         self.source_preview_kind = "file"
         process = QProcess(self)
+        self.configure_hidden_process(process)
         process.finished.connect(
             lambda exit_code, exit_status, proc=process, source_value=value: self.source_preview_finished(
                 proc, source_value, "file", exit_code, exit_status
@@ -933,6 +959,7 @@ class VideoSiftGUI(QWidget):
         self.source_drop_zone.set_loading()
         self.source_preview_kind = "url"
         process = QProcess(self)
+        self.configure_hidden_process(process)
         process.finished.connect(
             lambda exit_code, exit_status, proc=process, source_value=value: self.source_preview_finished(
                 proc, source_value, "url", exit_code, exit_status
@@ -1271,6 +1298,10 @@ class VideoSiftGUI(QWidget):
 
     def update_progress_from_text(self, text: str):
         plain = text.replace("\r", "\n")
+        if "Bilibili 站点字幕" in plain or "AI 字幕" in plain:
+            self.set_status("尝试字幕", "正在检查站点字幕，命中后可跳过音频转写。", max(self.progress_bar.value(), 14))
+        if "已使用站点字幕生成转写" in plain:
+            self.set_status("字幕转写", "已使用站点字幕生成转写文本。", max(self.progress_bar.value(), 68))
         if "正在提取音频" in plain or "Extracting URL" in plain or "Downloading webpage" in plain:
             self.set_status("下载音频", "正在获取视频信息并提取音频。", max(self.progress_bar.value(), 12))
         if "download:" in plain or "[download]" in plain:
@@ -1429,10 +1460,15 @@ class VideoSiftGUI(QWidget):
 
     def history_meta_text(self, job_dir: Path) -> str:
         metadata = self.read_metadata(job_dir)
-        model = metadata.get("whisper_model", "-")
+        transcript_source = self.transcript_source_text(metadata)
         language = metadata.get("language", "-")
         updated_at = datetime.fromtimestamp(job_dir.stat().st_mtime).strftime("%m-%d %H:%M")
-        return f"{self.job_status(job_dir)} · Whisper {model} · {language} · {updated_at}"
+        return f"{self.job_status(job_dir)} · {transcript_source} · {language} · {updated_at}"
+
+    def transcript_source_text(self, metadata: dict) -> str:
+        if metadata.get("transcript_source") == "site_subtitle":
+            return "字幕转写"
+        return f"Whisper {metadata.get('whisper_model', '-')}"
 
     def history_status_text(self, job_dir: Path) -> str:
         return f"● {self.job_status(job_dir)}"
@@ -1474,10 +1510,10 @@ class VideoSiftGUI(QWidget):
 
         metadata = self.read_metadata(job_dir)
         title = self.history_display_title(job_dir)
-        model = metadata.get("whisper_model", "-")
+        transcript_source = self.transcript_source_text(metadata)
         language = metadata.get("language", "-")
         self.history_title.setText(title)
-        self.history_meta.setText(f"{self.job_status(job_dir)} · Whisper {model} · 语言 {language} · {job_dir}")
+        self.history_meta.setText(f"{self.job_status(job_dir)} · {transcript_source} · 语言 {language} · {job_dir}")
 
         self.set_markdown_file(self.summary_view, job_dir / "summary.md", "暂无总结。")
         self.set_plain_file(self.transcript_view, job_dir / "transcript.txt", "暂无转写文本。")

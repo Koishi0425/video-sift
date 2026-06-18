@@ -1,6 +1,20 @@
 # 更新日志
 
-## v1.2.2 - 待发布
+## v1.2.3 - 待发布
+
+### 新增
+
+- Bilibili 视频会优先尝试使用可获取的站点字幕生成转写，成功时跳过音频下载和 Whisper。
+- 字幕命中时会保存原始字幕文件，并生成 `transcript.txt`、`transcript_with_timestamps.md` 和 `transcript_segments.json`。
+- 历史任务会标记转写来源，区分“字幕转写”和“Whisper 转写”。
+
+### 优化
+
+- GUI 和转写流程会隐藏 ffmpeg、ffprobe 以及 Whisper 间接拉起的 Windows 命令窗口。
+- 长音频切分改为由 ffprobe 探测时长、ffmpeg 直接分段，减少不可控子进程弹窗。
+- 站点字幕获取失败、解析失败或为空时，会自动回退到原有 Whisper 流程。
+
+## v1.2.2 - 已发布
 
 ### 新增
 

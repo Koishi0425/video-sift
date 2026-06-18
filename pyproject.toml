@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "video-sift"
-version = "1.2.2"
+version = "1.2.3"
 description = "Transcribe video/audio with Whisper and summarize it with DeepSeek."
 requires-python = ">=3.8"
 dependencies = [

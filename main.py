@@ -1,4 +1,5 @@
 import hashlib
+import html
 import json
 import logging
 import os
@@ -33,8 +34,6 @@ def bootstrap_tool_path() -> None:
 
 
 bootstrap_tool_path()
-
-from pydub import AudioSegment
 
 
 SYSTEM_PROMPT = """你是一个逻辑严密的知识提炼专家。用户会给你一份从视频中提取的语音识别文本。这个视频的讲解可能缺乏条理、内容跳脱、有很多口水话。你的任务是：
@@ -127,6 +126,13 @@ DEFAULT_BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/125.0.0.0 Safari/537.36"
+)
+TRANSCRIPT_SOURCE_WHISPER = "whisper"
+TRANSCRIPT_SOURCE_SITE_SUBTITLE = "site_subtitle"
+SUBTITLE_EXTENSIONS = {".json", ".json3", ".vtt", ".srt"}
+SUBTITLE_TIMING_PATTERN = re.compile(
+    r"(?P<start>(?:\d{1,2}:)?\d{2}:\d{2}[\.,]\d{3})\s+-->\s+"
+    r"(?P<end>(?:\d{1,2}:)?\d{2}:\d{2}[\.,]\d{3})"
 )
 
 
@@ -267,10 +273,12 @@ def write_metadata(
     workdir: Path,
     source: str,
     whisper_model: str,
-    audio_path: Path,
+    audio_path: Path | None,
     language: str,
     detected_language: str | None = None,
     video_info: dict | None = None,
+    transcript_source: str = TRANSCRIPT_SOURCE_WHISPER,
+    subtitle_path: Path | None = None,
 ) -> None:
     metadata = {
         "source": source,
@@ -279,8 +287,12 @@ def write_metadata(
         "whisper_model": whisper_model,
         "language": language,
         "detected_language": detected_language,
-        "audio_path": audio_path.name,
+        "transcript_source": transcript_source,
     }
+    if audio_path is not None:
+        metadata["audio_path"] = audio_path.name
+    if subtitle_path is not None:
+        metadata["subtitle_path"] = str(subtitle_path.relative_to(workdir))
     if video_info:
         metadata["video_info"] = video_info
     metadata_path(workdir).write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -295,12 +307,16 @@ def load_metadata(workdir: Path) -> dict | None:
 
 def metadata_matches(workdir: Path, source: str, whisper_model: str, language: str) -> bool:
     metadata = load_metadata(workdir)
+    if not metadata:
+        return False
+    source_matches = metadata.get("source") == source and metadata.get("source_hash") == source_hash(source)
+    language_matches = metadata.get("language") == language
+    if metadata.get("transcript_source") == TRANSCRIPT_SOURCE_SITE_SUBTITLE:
+        return source_matches and language_matches
     return bool(
-        metadata
-        and metadata.get("source") == source
-        and metadata.get("source_hash") == source_hash(source)
+        source_matches
+        and language_matches
         and metadata.get("whisper_model") == whisper_model
-        and metadata.get("language") == language
     )
 
 
@@ -372,13 +388,28 @@ def run_command(command: list[str], **kwargs):
     return subprocess.run(command, **kwargs)
 
 
-def configure_audio_tools() -> None:
-    ffmpeg = resolve_executable("ffmpeg", "FFMPEG_PATH")
-    ffprobe = resolve_executable("ffprobe", "FFPROBE_PATH")
-    if ffmpeg:
-        AudioSegment.converter = ffmpeg
-    if ffprobe:
-        AudioSegment.ffprobe = ffprobe
+def patch_whisper_subprocess() -> None:
+    if not SUBPROCESS_CREATION_FLAGS:
+        return
+
+    audio_module = getattr(whisper, "audio", None)
+    if audio_module is None or getattr(audio_module, "_video_sift_hidden_run", False):
+        return
+
+    original_run = getattr(audio_module, "run", None)
+    if original_run is None:
+        return
+
+    def hidden_run(*args, **kwargs):
+        kwargs.setdefault("creationflags", SUBPROCESS_CREATION_FLAGS)
+        try:
+            return original_run(*args, **kwargs)
+        except TypeError:
+            kwargs.pop("creationflags", None)
+            return original_run(*args, **kwargs)
+
+    audio_module.run = hidden_run
+    audio_module._video_sift_hidden_run = True
 
 
 def prepare_workdir(workdir: Path) -> None:
@@ -593,6 +624,31 @@ def _probe_audio_codec(filepath: Path) -> str | None:
         return None
 
 
+def probe_audio_duration(audio_path: Path) -> float | None:
+    command = [
+        ffprobe_command(),
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(audio_path),
+    ]
+    try:
+        result = run_command(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+            env=tool_env(),
+        )
+        duration = float(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        return None
+    return duration if duration > 0 else None
+
+
 def extract_audio(source: str, workdir: Path) -> Path:
     prepare_workdir(workdir)
     audio_path = workdir / "audio.mp3"
@@ -640,26 +696,50 @@ def extract_audio(source: str, workdir: Path) -> Path:
 
 
 def split_audio_if_needed(audio_path: Path, workdir: Path, max_minutes: int = MAX_CHUNK_MINUTES) -> list[tuple[Path, int]]:
-    configure_audio_tools()
-    audio = AudioSegment.from_file(audio_path)
-    max_ms = max_minutes * 60 * 1000
-    if len(audio) <= max_ms:
-        logging.info("音频长度 %.1f 分钟，不需要分段", len(audio) / 60000)
+    duration = probe_audio_duration(audio_path)
+    if duration is None:
+        logging.warning("无法探测音频时长，将不切分音频。")
+        return [(audio_path, 0)]
+
+    max_seconds = max_minutes * 60
+    if duration <= max_seconds:
+        logging.info("音频长度 %.1f 分钟，不需要分段", duration / 60)
         return [(audio_path, 0)]
 
     chunks_dir = workdir / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
     chunks = []
-    for index, start_ms in enumerate(range(0, len(audio), max_ms), start=1):
-        chunk = audio[start_ms : start_ms + max_ms]
+    index = 1
+    start_seconds = 0.0
+    while start_seconds < duration:
         chunk_path = chunks_dir / f"chunk_{index:03d}.mp3"
-        chunk.export(chunk_path, format="mp3")
+        chunk_duration = min(max_seconds, duration - start_seconds)
+        command = [
+            ffmpeg_command(),
+            "-y",
+            "-ss",
+            f"{start_seconds:.3f}",
+            "-t",
+            f"{chunk_duration:.3f}",
+            "-i",
+            str(audio_path),
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            str(chunk_path),
+        ]
+        logging.debug("执行音频切分命令：%s", " ".join(command))
+        run_command(command, check=True, env=tool_env())
+        start_ms = int(start_seconds * 1000)
         chunks.append((chunk_path, start_ms))
-    logging.info("音频长度 %.1f 分钟，将分为 %d 段", len(audio) / 60000, len(chunks))
+        index += 1
+        start_seconds += max_seconds
+    logging.info("音频长度 %.1f 分钟，将分为 %d 段", duration / 60, len(chunks))
     return chunks
 
 
 def detect_audio_language(model, audio_path: Path) -> str:
+    patch_whisper_subprocess()
     audio = whisper.load_audio(str(audio_path))
     audio = whisper.pad_or_trim(audio)
     mel = whisper.log_mel_spectrogram(audio).to(model.device)
@@ -682,6 +762,242 @@ def save_timestamp_files(workdir: Path, segments: list[dict]) -> None:
     (workdir / "transcript_with_timestamps.md").write_text("\n\n".join(lines), encoding="utf-8")
 
 
+def subtitle_timestamp_seconds(value: str) -> float:
+    value = value.replace(",", ".")
+    parts = value.split(":")
+    seconds = float(parts[-1])
+    minutes = int(parts[-2]) if len(parts) >= 2 else 0
+    hours = int(parts[-3]) if len(parts) >= 3 else 0
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def clean_subtitle_text(value: str) -> str:
+    text = html.unescape(value)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"\{\\.*?\}", "", text)
+    text = text.replace("\ufeff", "")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def dedupe_subtitle_segments(segments: list[dict]) -> list[dict]:
+    cleaned = []
+    previous = ""
+    for segment in sorted(segments, key=lambda item: (float(item["start"]), float(item["end"]))):
+        text = clean_subtitle_text(str(segment.get("text", "")))
+        normalized = re.sub(r"\s+", "", text)
+        if not text or (normalized and normalized == previous):
+            continue
+        cleaned.append(
+            {
+                "start": float(segment["start"]),
+                "end": float(segment["end"]),
+                "text": text,
+            }
+        )
+        previous = normalized
+    return cleaned
+
+
+def parse_bilibili_json_subtitle(path: Path) -> list[dict]:
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    segments = []
+
+    if isinstance(data, dict) and isinstance(data.get("body"), list):
+        for item in data["body"]:
+            text = clean_subtitle_text(str(item.get("content", "")))
+            if text:
+                segments.append(
+                    {
+                        "start": float(item.get("from", 0)),
+                        "end": float(item.get("to", item.get("from", 0))),
+                        "text": text,
+                    }
+                )
+        return dedupe_subtitle_segments(segments)
+
+    if isinstance(data, dict) and isinstance(data.get("events"), list):
+        for event in data["events"]:
+            parts = [
+                str(segment.get("utf8", ""))
+                for segment in event.get("segs", [])
+                if isinstance(segment, dict)
+            ]
+            text = clean_subtitle_text("".join(parts))
+            if text:
+                start = float(event.get("tStartMs", 0)) / 1000
+                duration = float(event.get("dDurationMs", 0)) / 1000
+                segments.append({"start": start, "end": start + duration, "text": text})
+        return dedupe_subtitle_segments(segments)
+
+    return []
+
+
+def parse_text_subtitle(path: Path) -> list[dict]:
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    segments = []
+    current_start = None
+    current_end = None
+    current_lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal current_start, current_end, current_lines
+        if current_start is None or current_end is None:
+            current_lines = []
+            return
+        caption = clean_subtitle_text(" ".join(current_lines))
+        if caption:
+            segments.append({"start": current_start, "end": current_end, "text": caption})
+        current_start = None
+        current_end = None
+        current_lines = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        match = SUBTITLE_TIMING_PATTERN.search(line)
+        if match:
+            flush()
+            current_start = subtitle_timestamp_seconds(match.group("start"))
+            current_end = subtitle_timestamp_seconds(match.group("end"))
+            continue
+        if not line:
+            flush()
+            continue
+        if line == "WEBVTT" or line.startswith(("NOTE", "STYLE", "REGION")):
+            continue
+        if current_start is None and line.isdigit():
+            continue
+        if current_start is not None:
+            current_lines.append(line)
+
+    flush()
+    return dedupe_subtitle_segments(segments)
+
+
+def parse_subtitle_file(path: Path) -> list[dict]:
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".json", ".json3"}:
+            return parse_bilibili_json_subtitle(path)
+        if suffix in {".vtt", ".srt"}:
+            return parse_text_subtitle(path)
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError) as exc:
+        logging.debug("解析字幕失败：%s，原因：%s", path, exc)
+    return []
+
+
+def subtitle_language_score(path: Path, language: str) -> tuple[int, str]:
+    name = path.name.lower()
+    score = 100
+    requested = language.lower()
+    if requested != "auto" and requested in name:
+        score -= 40
+    if any(token in name for token in ("zh-hans", "zh-cn", ".zh.", "chinese", "zho", "chi")):
+        score -= 30
+    if any(token in name for token in ("ai", "auto")):
+        score += 5
+    score += {".json": 0, ".json3": 1, ".vtt": 2, ".srt": 3}.get(path.suffix.lower(), 20)
+    return score, name
+
+
+def subtitle_candidates(subtitle_dir: Path, language: str) -> list[Path]:
+    files = [
+        path
+        for path in subtitle_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in SUBTITLE_EXTENSIONS
+    ]
+    return sorted(files, key=lambda path: subtitle_language_score(path, language))
+
+
+def append_subtitle_text(current: str, text: str) -> str:
+    if not current:
+        return text
+    if re.search(r"[\u4e00-\u9fff，。！？；：、）】》]$", current) or re.match(
+        r"^[\u4e00-\u9fff，。！？；：、）】》]",
+        text,
+    ):
+        return current + text
+    return current + " " + text
+
+
+def subtitle_segments_to_transcript(segments: list[dict]) -> str:
+    paragraphs = []
+    current = ""
+    for segment in segments:
+        text = str(segment["text"]).strip()
+        current = append_subtitle_text(current, text)
+        if len(current) >= 180 or text.endswith(("。", "！", "？", ".", "!", "?")):
+            paragraphs.append(current)
+            current = ""
+    if current:
+        paragraphs.append(current)
+    return "\n\n".join(paragraphs).strip()
+
+
+def download_site_subtitles(source: str, workdir: Path, language: str) -> Path | None:
+    subtitle_dir = workdir / "site_subtitles"
+    if subtitle_dir.exists():
+        shutil.rmtree(subtitle_dir)
+    subtitle_dir.mkdir(parents=True, exist_ok=True)
+
+    command = [
+        *ytdlp_command(),
+        "--skip-download",
+        "--no-playlist",
+        "--write-subs",
+        "--write-auto-subs",
+        "--sub-langs",
+        "all",
+        "--sub-format",
+        "json/json3/vtt/srt/best",
+        "-o",
+        str(subtitle_dir / "%(id)s.%(language)s.%(ext)s"),
+        *ytdlp_request_args(source),
+        source,
+    ]
+    logging.debug("执行字幕下载命令：%s", " ".join(command))
+    try:
+        run_command(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=tool_env(),
+        )
+    except (subprocess.CalledProcessError, OSError) as exc:
+        logging.info("未能获取站点字幕，将回退 Whisper：%s", exc)
+        return None
+
+    for path in subtitle_candidates(subtitle_dir, language):
+        segments = parse_subtitle_file(path)
+        transcript = subtitle_segments_to_transcript(segments)
+        if transcript:
+            transcript_path(workdir).write_text(transcript, encoding="utf-8")
+            save_timestamp_files(workdir, segments)
+            logging.info("已使用站点字幕生成转写：%s", path)
+            return path
+
+    logging.info("未找到可解析的站点字幕，将回退 Whisper。")
+    return None
+
+
+def transcribe_from_site_subtitles(source: str, workdir: Path, language: str) -> tuple[str, Path] | None:
+    if not is_bilibili_url(source):
+        return None
+
+    logging.info("正在尝试使用 Bilibili 站点字幕/AI 字幕...")
+    subtitle_path = download_site_subtitles(source, workdir, language)
+    if subtitle_path is None:
+        return None
+
+    transcript = transcript_path(workdir).read_text(encoding="utf-8")
+    if not transcript.strip():
+        return None
+    return transcript, subtitle_path
+
+
 def transcribe_audio(
     audio_path: Path,
     workdir: Path,
@@ -690,6 +1006,7 @@ def transcribe_audio(
     language: str,
     context: dict | None = None,
 ) -> tuple[str, str | None]:
+    patch_whisper_subprocess()
     chunks = split_audio_if_needed(audio_path, workdir)
     initial_prompt = whisper_initial_prompt(context or {})
     if initial_prompt:
@@ -953,7 +1270,6 @@ def main(
     source = normalize_source(source)
     language = language.strip().lower()
     validate_stage_options(download_only, transcript_only, summary_only)
-    ensure_ffmpeg_available()
     video_info = fetch_video_info(source)
     job_dir = resolve_job_dir(source, workdir, video_info)
     prepare_workdir(job_dir)
@@ -987,16 +1303,16 @@ def main(
             raise click.ClickException("--summary-only 需要当前输入源和 Whisper 模型匹配的 transcript.txt。")
         transcript = cached_transcript_path.read_text(encoding="utf-8")
     else:
-        if not force and metadata_matches(job_dir, source, whisper_model, language) and is_nonempty_file(audio_path):
-            logging.info("复用已存在的音频：%s", audio_path)
-        else:
-            started_at = time.perf_counter()
-            logging.info("正在提取音频...")
-            audio_path = extract_audio(source, job_dir)
-            write_metadata(job_dir, source, whisper_model, audio_path, language, video_info=video_info)
-            log_stage("音频提取", started_at)
-
         if download_only:
+            ensure_ffmpeg_available()
+            if not force and metadata_matches(job_dir, source, whisper_model, language) and is_nonempty_file(audio_path):
+                logging.info("复用已存在的音频：%s", audio_path)
+            else:
+                started_at = time.perf_counter()
+                logging.info("正在提取音频...")
+                audio_path = extract_audio(source, job_dir)
+                write_metadata(job_dir, source, whisper_model, audio_path, language, video_info=video_info)
+                log_stage("音频提取", started_at)
             logging.info("已按 --download-only 停止：%s", audio_path)
             announce_outputs(
                 "音频已准备好",
@@ -1011,11 +1327,47 @@ def main(
             logging.info("复用已匹配的转写文本：%s", cached_transcript_path)
             transcript = cached_transcript_path.read_text(encoding="utf-8")
         else:
+            transcript = ""
             started_at = time.perf_counter()
-            logging.info("正在进行语音转文字...")
-            transcript, detected_language = transcribe_audio(audio_path, job_dir, detect_model, whisper_model, language, context)
-            write_metadata(job_dir, source, whisper_model, audio_path, language, detected_language, video_info)
-            log_stage("语音转文字", started_at)
+            subtitle_result = transcribe_from_site_subtitles(source, job_dir, language)
+            if subtitle_result:
+                transcript, subtitle_path = subtitle_result
+                write_metadata(
+                    job_dir,
+                    source,
+                    whisper_model,
+                    None,
+                    language,
+                    video_info=video_info,
+                    transcript_source=TRANSCRIPT_SOURCE_SITE_SUBTITLE,
+                    subtitle_path=subtitle_path,
+                )
+                log_stage("站点字幕转写", started_at)
+            else:
+                ensure_ffmpeg_available()
+                if not force and metadata_matches(job_dir, source, whisper_model, language) and is_nonempty_file(audio_path):
+                    logging.info("复用已存在的音频：%s", audio_path)
+                else:
+                    started_at = time.perf_counter()
+                    logging.info("正在提取音频...")
+                    audio_path = extract_audio(source, job_dir)
+                    write_metadata(job_dir, source, whisper_model, audio_path, language, video_info=video_info)
+                    log_stage("音频提取", started_at)
+
+                started_at = time.perf_counter()
+                logging.info("正在进行语音转文字...")
+                transcript, detected_language = transcribe_audio(audio_path, job_dir, detect_model, whisper_model, language, context)
+                write_metadata(
+                    job_dir,
+                    source,
+                    whisper_model,
+                    audio_path,
+                    language,
+                    detected_language,
+                    video_info,
+                    transcript_source=TRANSCRIPT_SOURCE_WHISPER,
+                )
+                log_stage("语音转文字", started_at)
 
     if not transcript.strip():
         raise click.ClickException("转写结果为空，无法总结。")
